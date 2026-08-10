@@ -1,0 +1,6 @@
+This example project is dedicated to the public domain under CC0 1.0.
+You may copy, modify, teach with, and redistribute the example code without restriction.
+
+Third-party libraries are loaded from their respective CDNs and remain under their own licenses:
+- A-Frame: MIT License
+- AR.js: MIT License
