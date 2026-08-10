@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#05070c">
+<title>AR Washing Machine — QR Scanner</title>
+<style>
+  :root{
+    --bg:#05070c;
+    --ink:#e8f1ff;
+    --dim:#7d8ba3;
+    --line:rgba(120,190,255,.25);
+    --cyan:#38e1ff;
+    --green:#2fe08a;
+    --red:#ff4d5e;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;overflow:hidden;background:var(--bg);}
+  body{
+    font-family:"Noto Sans Thai","Sarabun",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    color:var(--ink);
+    position:fixed;inset:0;
+    touch-action:none;
+  }
+
+  /* ---------- ชั้นกล้อง ---------- */
+  #video{
+    position:absolute;inset:0;width:100%;height:100%;
+    object-fit:cover;background:#000;
+  }
+  #three{
+    position:absolute;inset:0;width:100%;height:100%;
+    pointer-events:auto;
+  }
+  #scanCanvas{display:none;}
+
+  /* ---------- HUD ---------- */
+  .hud{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;justify-content:space-between;
+    padding:calc(env(safe-area-inset-top) + 14px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    pointer-events:none;
+  }
+  .topbar{
+    display:flex;align-items:center;gap:10px;
+    background:rgba(5,7,12,.55);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--line);border-radius:14px;
+    padding:10px 14px;
+  }
+  .dot{
+    width:9px;height:9px;border-radius:50%;background:var(--cyan);
+    box-shadow:0 0 12px var(--cyan);flex:none;
+    animation:pulse 1.6s ease-in-out infinite;
+  }
+  .dot.on{background:var(--green);box-shadow:0 0 12px var(--green);}
+  .dot.off{background:var(--red);box-shadow:0 0 12px var(--red);animation:none;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.25;}}
+  .title{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);}
+  .status{font-size:14px;font-weight:600;line-height:1.35;}
+
+  /* ---------- กรอบเล็ง QR ---------- */
+  .reticle{
+    position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    width:min(64vw,260px);aspect-ratio:1;
+    transition:opacity .4s ease, transform .4s ease;
+  }
+  .reticle span{
+    position:absolute;width:34px;height:34px;
+    border:3px solid var(--cyan);border-radius:4px;
+    filter:drop-shadow(0 0 8px rgba(56,225,255,.7));
+  }
+  .reticle span:nth-child(1){top:0;left:0;border-right:0;border-bottom:0;}
+  .reticle span:nth-child(2){top:0;right:0;border-left:0;border-bottom:0;}
+  .reticle span:nth-child(3){bottom:0;left:0;border-right:0;border-top:0;}
+  .reticle span:nth-child(4){bottom:0;right:0;border-left:0;border-top:0;}
+  .scanline{
+    position:absolute;left:6%;right:6%;height:2px;top:0;
+    background:linear-gradient(90deg,transparent,var(--cyan),transparent);
+    animation:sweep 2.2s ease-in-out infinite;
+  }
+  @keyframes sweep{0%{top:4%;}50%{top:94%;}100%{top:4%;}}
+  .reticle.hide{opacity:0;transform:translate(-50%,-50%) scale(1.35);}
+
+  /* ---------- แผงควบคุม ---------- */
+  .panel{
+    pointer-events:auto;
+    background:rgba(5,7,12,.62);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--line);border-radius:18px;
+    padding:14px;
+    transform:translateY(140%);opacity:0;
+    transition:transform .45s cubic-bezier(.2,.9,.25,1), opacity .35s ease;
+  }
+  .panel.show{transform:translateY(0);opacity:1;}
+  .machine-state{
+    display:flex;align-items:center;justify-content:space-between;
+    font-size:13px;color:var(--dim);margin-bottom:12px;
+  }
+  .machine-state b{color:var(--ink);font-size:15px;}
+  .btnrow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  button{
+    font-family:inherit;font-size:16px;font-weight:700;color:var(--ink);
+    background:rgba(255,255,255,.06);
+    border:1px solid var(--line);border-radius:13px;
+    padding:15px 10px;cursor:pointer;
+    transition:transform .12s ease, background .2s ease, border-color .2s ease;
+  }
+  button:active{transform:scale(.96);}
+  button.power-on.active{background:rgba(47,224,138,.18);border-color:var(--green);color:var(--green);}
+  button.power-off.active{background:rgba(255,77,94,.16);border-color:var(--red);color:var(--red);}
+  .ghost{
+    margin-top:10px;width:100%;font-size:13px;font-weight:600;color:var(--dim);
+    background:transparent;border:1px dashed rgba(125,139,163,.4);padding:11px;
+  }
+  .hint{
+    margin-top:10px;font-size:11.5px;color:var(--dim);text-align:center;line-height:1.5;
+  }
+
+  /* ---------- หน้าจอเริ่มต้น / ข้อผิดพลาด ---------- */
+  .gate{
+    position:absolute;inset:0;z-index:20;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:18px;padding:28px;text-align:center;
+    background:radial-gradient(circle at 50% 35%,#0d1626,#05070c 70%);
+  }
+  .gate h1{font-size:22px;font-weight:800;letter-spacing:.02em;}
+  .gate p{font-size:14px;color:var(--dim);line-height:1.7;max-width:330px;}
+  .gate code{color:var(--cyan);font-size:13px;letter-spacing:.06em;}
+  .gate button{width:100%;max-width:300px;padding:17px;background:rgba(56,225,255,.14);border-color:var(--cyan);}
+  .gate.hidden{display:none;}
+  .err{color:var(--red);font-size:14px;line-height:1.7;max-width:330px;}
+</style>
+</head>
+<body>
+
+<video id="video" playsinline muted autoplay></video>
+<canvas id="three"></canvas>
+<canvas id="scanCanvas"></canvas>
+
+<div class="reticle" id="reticle">
+  <span></span><span></span><span></span><span></span>
+  <div class="scanline"></div>
+</div>
+
+<div class="hud">
+  <div class="topbar">
+    <div class="dot" id="hudDot"></div>
+    <div>
+      <div class="title">AR Washing Machine</div>
+      <div class="status" id="statusText">กำลังเปิดกล้อง…</div>
+    </div>
+  </div>
+
+  <div class="panel" id="panel">
+    <div class="machine-state">
+      <span>สถานะเครื่อง</span>
+      <b id="stateText">ปิดเครื่อง</b>
+    </div>
+    <div class="btnrow">
+      <button class="power-on" id="btnOn">เปิดเครื่อง</button>
+      <button class="power-off active" id="btnOff">ปิดเครื่อง</button>
+    </div>
+    <button class="ghost" id="btnRescan">สแกน QR Code ใหม่</button>
+    <div class="hint">ลากนิ้วเพื่อหมุนโมเดล · ใช้สองนิ้วเพื่อย่อ/ขยาย</div>
+  </div>
+</div>
+
+<div class="gate" id="gate">
+  <h1>สแกน QR Code เพื่อเรียกดูเครื่องซักผ้า 3 มิติ</h1>
+  <p>เตรียม QR Code ที่มีข้อความ<br><code>AR-WASHING-MACHINE</code><br>แล้วเล็งกล้องหลังไปที่ QR Code นั้น</p>
+  <button id="btnStart">เปิดกล้อง</button>
+  <p class="err" id="errText" style="display:none"></p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var TARGET = "AR-WASHING-MACHINE";
+
+  var video      = document.getElementById("video");
+  var scanCanvas = document.getElementById("scanCanvas");
+  var scanCtx    = scanCanvas.getContext("2d", { willReadFrequently: true });
+  var glCanvas   = document.getElementById("three");
+  var reticle    = document.getElementById("reticle");
+  var panel      = document.getElementById("panel");
+  var gate       = document.getElementById("gate");
+  var errText    = document.getElementById("errText");
+  var statusText = document.getElementById("statusText");
+  var stateText  = document.getElementById("stateText");
+  var hudDot     = document.getElementById("hudDot");
+  var btnOn      = document.getElementById("btnOn");
+  var btnOff     = document.getElementById("btnOff");
+  var btnRescan  = document.getElementById("btnRescan");
+  var btnStart   = document.getElementById("btnStart");
+
+  var stream   = null;
+  var detected = false;   // เจอ QR ที่ถูกต้องแล้วหรือยัง
+  var running  = false;   // เครื่องซักผ้าทำงานอยู่หรือไม่
+  var frame    = 0;
+  var lastWrong = 0;
+
+  /* =====================================================
+     1) กล้อง
+  ===================================================== */
+  function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError("เบราว์เซอร์นี้ไม่รองรับการเรียกใช้กล้อง กรุณาเปิดด้วย Chrome หรือ Safari เวอร์ชันล่าสุด");
+      return;
+    }
+    if (!window.isSecureContext) {
+      showError("ต้องเปิดหน้านี้ผ่าน https:// หรือ localhost เท่านั้น เบราว์เซอร์จึงจะอนุญาตให้ใช้กล้องได้");
+      return;
+    }
+
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    }).then(function (s) {
+      stream = s;
+      video.srcObject = s;
+      return video.play();
+    }).then(function () {
+      gate.classList.add("hidden");
+      setStatus("เล็งกล้องไปที่ QR Code ที่มีข้อความ AR-WASHING-MACHINE");
+      requestAnimationFrame(loop);
+    }).catch(function (e) {
+      var msg = "เปิดกล้องไม่สำเร็จ: " + (e && e.name ? e.name : "Unknown");
+      if (e && (e.name === "NotAllowedError" || e.name === "SecurityError")) {
+        msg = "คุณยังไม่ได้อนุญาตให้ใช้กล้อง กรุณากดอนุญาตในแถบที่อยู่ของเบราว์เซอร์ แล้วโหลดหน้านี้ใหม่";
+      } else if (e && e.name === "NotFoundError") {
+        msg = "ไม่พบกล้องบนอุปกรณ์นี้";
+      }
+      showError(msg);
+    });
+  }
+
+  function showError(msg) {
+    gate.classList.remove("hidden");
+    errText.style.display = "block";
+    errText.textContent = msg;
+    setStatus("ยังไม่ได้เปิดกล้อง");
+  }
+
+  function setStatus(t) { statusText.textContent = t; }
+
+  /* =====================================================
+     2) อ่าน QR Code ด้วย jsQR
+  ===================================================== */
+  function scanQR() {
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+    var w = 360;
+    var h = Math.round(w * (video.videoHeight / video.videoWidth)) || 480;
+    if (scanCanvas.width !== w) { scanCanvas.width = w; scanCanvas.height = h; }
+
+    scanCtx.drawImage(video, 0, 0, w, h);
+    var img = scanCtx.getImageData(0, 0, w, h);
+    var code = jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
+    if (!code) return;
+
+    var text = (code.data || "").trim();
+    if (text.toUpperCase() === TARGET) {
+      onDetected();
+    } else if (Date.now() - lastWrong > 1200) {
+      lastWrong = Date.now();
+      setStatus("พบ QR Code แต่ข้อความไม่ตรง: " + text.slice(0, 28));
+    }
+  }
+
+  function onDetected() {
+    if (detected) return;
+    detected = true;
+    reticle.classList.add("hide");
+    panel.classList.add("show");
+    setStatus("พบ QR Code แล้ว — แสดงเครื่องซักผ้า 3 มิติ");
+    hudDot.className = "dot off";
+    washer.visible = true;
+    dropIn = 0;
+    if (navigator.vibrate) navigator.vibrate(35);
+  }
+
+  function rescan() {
+    detected = false;
+    setPower(false);
+    washer.visible = false;
+    panel.classList.remove("show");
+    reticle.classList.remove("hide");
+    hudDot.className = "dot";
+    setStatus("เล็งกล้องไปที่ QR Code ที่มีข้อความ AR-WASHING-MACHINE");
+  }
+
+  /* =====================================================
+     3) ฉาก Three.js — เครื่องซักผ้า
+  ===================================================== */
+  var renderer = new THREE.WebGLRenderer({ canvas: glCanvas, alpha: true, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+
+  var scene  = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+  camera.position.set(0, 0.4, 7.2);
+  camera.lookAt(0, 0, 0);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  scene.add(new THREE.HemisphereLight(0xdfefff, 0x202832, 0.7));
+
+  var key = new THREE.DirectionalLight(0xffffff, 0.9);
+  key.position.set(4, 6, 6);
+  scene.add(key);
+
+  var rim = new THREE.DirectionalLight(0x8ad8ff, 0.6);
+  rim.position.set(-5, 2, -4);
+  scene.add(rim);
+
+  var washer = new THREE.Group();
+  washer.visible = false;
+  scene.add(washer);
+
+  var W = 2.0, H = 2.5, D = 1.8, FZ = D / 2;
+
+  var bodyMat  = new THREE.MeshStandardMaterial({ color: 0xf2f5f8, roughness: 0.42, metalness: 0.28 });
+  var darkMat  = new THREE.MeshStandardMaterial({ color: 0x1b2230, roughness: 0.55, metalness: 0.35 });
+  var steelMat = new THREE.MeshStandardMaterial({ color: 0xbcc6d2, roughness: 0.25, metalness: 0.9, side: THREE.DoubleSide });
+
+  // ตัวเครื่อง
+  var body = new THREE.Mesh(new THREE.BoxGeometry(W, H, D), bodyMat);
+  washer.add(body);
+
+  // แผงหน้าเครื่อง (สีเข้ม) ให้ดูมีมิติ
+  var face = new THREE.Mesh(new THREE.BoxGeometry(W * 0.94, H * 0.94, 0.06), new THREE.MeshStandardMaterial({
+    color: 0xe4eaf0, roughness: 0.35, metalness: 0.3
+  }));
+  face.position.z = FZ + 0.01;
+  washer.add(face);
+
+  // แผงควบคุมด้านบน
+  var cpanel = new THREE.Mesh(new THREE.BoxGeometry(W * 0.9, 0.46, 0.09), darkMat);
+  cpanel.position.set(0, H / 2 - 0.42, FZ + 0.05);
+  washer.add(cpanel);
+
+  // จอแสดงผล
+  var screenMat = new THREE.MeshStandardMaterial({ color: 0x0a1a18, emissive: 0x0d3a2c, emissiveIntensity: 0.4, roughness: 0.3 });
+  var screen = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.24, 0.03), screenMat);
+  screen.position.set(0.12, H / 2 - 0.42, FZ + 0.11);
+  washer.add(screen);
+
+  // ปุ่มหมุนโปรแกรมซัก
+  var knob = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.1, 28), steelMat);
+  knob.rotation.x = Math.PI / 2;
+  knob.position.set(-0.66, H / 2 - 0.42, FZ + 0.12);
+  washer.add(knob);
+  var knobMark = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.09, 0.02), darkMat);
+  knobMark.position.set(0, 0.075, 0.05);
+  knob.add(knobMark);
+
+  // ไฟสถานะ
+  var ledMat = new THREE.MeshStandardMaterial({ color: 0xff4d5e, emissive: 0xff2b3d, emissiveIntensity: 1.4, roughness: 0.2 });
+  var led = new THREE.Mesh(new THREE.SphereGeometry(0.085, 24, 24), ledMat);
+  led.position.set(0.74, H / 2 - 0.42, FZ + 0.12);
+  washer.add(led);
+
+  var ledGlow = new THREE.PointLight(0xff2b3d, 1.1, 2.4);
+  ledGlow.position.copy(led.position);
+  washer.add(ledGlow);
+
+  var ledHalo = new THREE.Mesh(
+    new THREE.RingGeometry(0.11, 0.2, 28),
+    new THREE.MeshBasicMaterial({ color: 0xff2b3d, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
+  );
+  ledHalo.position.set(led.position.x, led.position.y, FZ + 0.08);
+  washer.add(ledHalo);
+
+  // วงแหวนประตู
+  var doorY = -0.28;
+  var ring = new THREE.Mesh(new THREE.TorusGeometry(0.68, 0.1, 20, 48), new THREE.MeshStandardMaterial({
+    color: 0x2b3444, roughness: 0.4, metalness: 0.6
+  }));
+  ring.position.set(0, doorY, FZ + 0.04);
+  washer.add(ring);
+
+  // กระจกประตูโค้ง
+  var glass = new THREE.Mesh(
+    new THREE.SphereGeometry(0.66, 32, 24, 0, Math.PI * 2, 0, Math.PI * 0.42),
+    new THREE.MeshStandardMaterial({
+      color: 0x9fd8ff, transparent: true, opacity: 0.24,
+      roughness: 0.05, metalness: 0.1, side: THREE.DoubleSide
+    })
+  );
+  glass.rotation.x = Math.PI / 2;
+  glass.position.set(0, doorY, FZ + 0.02);
+  washer.add(glass);
+
+  // มือจับประตู
+  var handle = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.34, 0.1), darkMat);
+  handle.position.set(-0.78, doorY, FZ + 0.06);
+  washer.add(handle);
+
+  // ---- ถังซัก (หมุนได้) ----
+  var drum = new THREE.Group();
+  drum.position.set(0, doorY, FZ - 0.55);
+  washer.add(drum);
+
+  var drumShell = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1.0, 40, 1, true), steelMat);
+  drumShell.rotation.x = Math.PI / 2;
+  drum.add(drumShell);
+
+  var drumBack = new THREE.Mesh(new THREE.CircleGeometry(0.6, 40), new THREE.MeshStandardMaterial({
+    color: 0x8f9aa8, roughness: 0.3, metalness: 0.85
+  }));
+  drumBack.position.z = -0.5;
+  drum.add(drumBack);
+
+  // ครีบในถังซัก 3 อัน — ทำให้เห็นชัดว่าถังกำลังหมุน
+  for (var i = 0; i < 3; i++) {
+    var fin = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.92), new THREE.MeshStandardMaterial({
+      color: 0xdfe6ee, roughness: 0.35, metalness: 0.5
+    }));
+    var a = (i / 3) * Math.PI * 2;
+    fin.position.set(Math.cos(a) * 0.5, Math.sin(a) * 0.5, 0);
+    fin.rotation.z = a;
+    drum.add(fin);
+  }
+
+  // ผ้าในถัง (ก้อนสีสด หมุนตามถัง)
+  var clothColors = [0x4aa3ff, 0xffcf5c, 0xff7a90, 0x63e6b4];
+  for (var c = 0; c < 4; c++) {
+    var cloth = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), new THREE.MeshStandardMaterial({
+      color: clothColors[c], roughness: 0.9, metalness: 0
+    }));
+    var ang = (c / 4) * Math.PI * 2 + 0.6;
+    cloth.position.set(Math.cos(ang) * 0.3, Math.sin(ang) * 0.3, (c - 1.5) * 0.18);
+    cloth.scale.set(1, 0.75, 1.15);
+    drum.add(cloth);
+  }
+
+  // ขาตั้ง
+  for (var f = 0; f < 4; f++) {
+    var foot = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.16, 16), darkMat);
+    foot.position.set(f < 2 ? -W / 2 + 0.24 : W / 2 - 0.24, -H / 2 - 0.07, (f % 2 === 0 ? 1 : -1) * (D / 2 - 0.24));
+    washer.add(foot);
+  }
+
+  // เงาตกกระทบแบบง่าย
+  var shadow = new THREE.Mesh(
+    new THREE.CircleGeometry(1.5, 40),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28 })
+  );
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = -H / 2 - 0.16;
+  washer.add(shadow);
+
+  /* =====================================================
+     4) เปิด / ปิดเครื่อง
+  ===================================================== */
+  function setPower(on) {
+    running = on;
+    stateText.textContent = on ? "กำลังซัก" : "ปิดเครื่อง";
+    btnOn.classList.toggle("active", on);
+    btnOff.classList.toggle("active", !on);
+
+    var col = on ? 0x2fe08a : 0xff4d5e;
+    ledMat.color.setHex(col);
+    ledMat.emissive.setHex(col);
+    ledGlow.color.setHex(col);
+    ledHalo.material.color.setHex(col);
+    screenMat.emissive.setHex(on ? 0x14c47a : 0x102028);
+    screenMat.emissiveIntensity = on ? 0.9 : 0.25;
+
+    if (detected) hudDot.className = on ? "dot on" : "dot off";
+    if (navigator.vibrate) navigator.vibrate(on ? [20, 40, 20] : 20);
+  }
+
+  btnOn.addEventListener("click", function () { setPower(true); });
+  btnOff.addEventListener("click", function () { setPower(false); });
+  btnRescan.addEventListener("click", rescan);
+  btnStart.addEventListener("click", function () {
+    errText.style.display = "none";
+    startCamera();
+  });
+
+  /* =====================================================
+     5) หมุน / ย่อขยายด้วยนิ้ว
+  ===================================================== */
+  var userRotY = 0, userRotX = 0, zoom = 0;
+  var dragging = false, lastX = 0, lastY = 0, pinchStart = 0, pinchZoom = 0;
+
+  glCanvas.addEventListener("touchstart", function (e) {
+    if (!detected) return;
+    if (e.touches.length === 1) {
+      dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+      dragging = false; pinchStart = dist(e.touches); pinchZoom = zoom;
+    }
+  }, { passive: true });
+
+  glCanvas.addEventListener("touchmove", function (e) {
+    if (!detected) return;
+    if (e.touches.length === 1 && dragging) {
+      userRotY += (e.touches[0].clientX - lastX) * 0.008;
+      userRotX += (e.touches[0].clientY - lastY) * 0.005;
+      userRotX = Math.max(-0.5, Math.min(0.5, userRotX));
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    } else if (e.touches.length === 2 && pinchStart > 0) {
+      zoom = Math.max(-2.2, Math.min(2.6, pinchZoom + (dist(e.touches) - pinchStart) * 0.012));
+    }
+  }, { passive: true });
+
+  glCanvas.addEventListener("touchend", function () { dragging = false; pinchStart = 0; }, { passive: true });
+
+  function dist(t) {
+    var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /* =====================================================
+     6) ลูปหลัก
+  ===================================================== */
+  var clock = new THREE.Clock();
+  var dropIn = 1;
+  var spin = 0;
+
+  function loop() {
+    requestAnimationFrame(loop);
+    frame++;
+
+    // สแกน QR ทุก ๆ 4 เฟรม เพื่อไม่ให้กินซีพียูมากเกินไป
+    if (!detected && frame % 4 === 0) scanQR();
+
+    var dt = Math.min(clock.getDelta(), 0.05);
+    var t = clock.getElapsedTime();
+
+    if (washer.visible) {
+      dropIn = Math.min(1, dropIn + dt * 2.2);
+      var ease = 1 - Math.pow(1 - dropIn, 3);
+
+      // ความเร็วถังซัก: เร่งขึ้นตอนเปิด และค่อย ๆ หยุดตอนปิด
+      var target = running ? 4.2 : 0;
+      spin += (target - spin) * dt * (running ? 1.6 : 2.4);
+      drum.rotation.z += spin * dt;
+
+      // เครื่องสั่นเบา ๆ ขณะซัก
+      var shake = running ? Math.min(1, spin / 4.2) * 0.02 : 0;
+      washer.position.x = Math.sin(t * 42) * shake;
+      washer.position.y = -0.15 + Math.cos(t * 55) * shake * 0.6 + (1 - ease) * 2.4;
+
+      washer.rotation.y = userRotY + Math.sin(t * 0.35) * 0.14;
+      washer.rotation.x = userRotX;
+      washer.scale.setScalar(ease);
+
+      // ไฟสถานะกะพริบเมื่อกำลังซัก
+      ledMat.emissiveIntensity = running ? 1.3 + Math.sin(t * 6) * 0.6 : 1.1;
+      ledGlow.intensity = running ? 1.4 + Math.sin(t * 6) * 0.6 : 0.9;
+      ledHalo.material.opacity = running ? 0.3 + Math.sin(t * 6) * 0.15 : 0.22;
+
+      camera.position.z = 7.2 - zoom;
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  window.addEventListener("resize", function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden && stream) {
+      video.pause();
+    } else if (stream) {
+      video.play().catch(function () {});
+    }
+  });
+
+  setPower(false);
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>
