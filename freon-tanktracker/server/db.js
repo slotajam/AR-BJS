@@ -22,8 +22,12 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK (role IN ('admin','operator','supervisor')),
   active INTEGER NOT NULL DEFAULT 1,
   preferred_lang TEXT NOT NULL DEFAULT 'en',
+  phone_e164 TEXT,                          -- registered mobile (E.164); events need it verified
+  phone_verified_at TEXT,
+  phone_changed_at TEXT,                    -- set when an existing number is replaced
   created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS users_phone ON users(phone_e164) WHERE phone_e164 IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
   token_hash TEXT PRIMARY KEY,
@@ -43,6 +47,8 @@ CREATE TABLE IF NOT EXISTS sites (
   lng REAL,
   radius_m REAL,
   active INTEGER NOT NULL DEFAULT 1,
+  contact_phone_e164 TEXT,                  -- customer contact: receipt codes and statements
+  contact_phone_verified_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -128,41 +134,24 @@ CREATE TABLE IF NOT EXISTS inspection_sessions (
   cylinder_id TEXT REFERENCES cylinders(id),
   qr_token TEXT,
   scan_method TEXT,
+  scan_cylinder_version INTEGER,            -- cylinder version when scanned (concurrency check)
+  scan_far_m REAL,                          -- distance moved between location confirmation and scan
+  audit_id INTEGER,
+  site_id INTEGER REFERENCES sites(id),     -- server-confirmed location
+  loc_lat REAL,
+  loc_lng REAL,
+  loc_accuracy_m REAL,
+  loc_fix_timestamp TEXT,
+  loc_fix_age_ms INTEGER,
+  loc_geofence TEXT,
+  loc_distance_m REAL,
+  loc_confirmed_at TEXT,
+  loc_confirmed_until TEXT,                 -- scanner unlocked until this time
+  loc_exception_reason TEXT,                -- supervisor exception instead of a confirmed location
+  loc_issue TEXT,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS challenges (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES inspection_sessions(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  cylinder_id TEXT NOT NULL REFERENCES cylinders(id),
-  code TEXT NOT NULL,
-  instruction_key TEXT NOT NULL,
-  cylinder_version INTEGER NOT NULL,
-  issued_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  used_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS media (
-  id TEXT PRIMARY KEY,
-  challenge_id TEXT NOT NULL UNIQUE REFERENCES challenges(id),
-  session_id TEXT NOT NULL REFERENCES inspection_sessions(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  cylinder_id TEXT NOT NULL REFERENCES cylinders(id),
-  file TEXT,
-  mime TEXT NOT NULL,
-  size_bytes INTEGER NOT NULL,
-  sha256 TEXT NOT NULL,
-  capture_source TEXT NOT NULL,
-  client_started_at TEXT,
-  client_stopped_at TEXT,
-  duration_ms INTEGER,
-  server_received_at TEXT NOT NULL,
-  purged_at TEXT
-);
-CREATE INDEX IF NOT EXISTS media_sha ON media(sha256);
 
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY,
@@ -192,8 +181,16 @@ CREATE TABLE IF NOT EXISTS events (
   qr_verified INTEGER NOT NULL DEFAULT 0,
   nfc_status TEXT NOT NULL DEFAULT 'not_used',
   session_id TEXT,
-  challenge_id TEXT,
-  media_id TEXT,
+  snapshot_id TEXT,                         -- still photo from the live camera at scan
+  gross_weight_kg REAL,
+  net_content_kg REAL,
+  scale_id TEXT,
+  weight_entered_by INTEGER,
+  sms_verified_at TEXT,                     -- event written only after the SMS code was confirmed
+  sms_recipient TEXT,                       -- operator | site_contact
+  sms_phone_masked TEXT,
+  audit_id INTEGER,
+  audit_outcome TEXT,
   initial_verification TEXT NOT NULL,
   is_exception INTEGER NOT NULL DEFAULT 0,
   exception_kind TEXT,
@@ -254,9 +251,8 @@ CREATE TRIGGER IF NOT EXISTS ${t}_no_delete BEFORE DELETE ON ${t}
 BEGIN SELECT RAISE(ABORT, 'append-only table: ${t} cannot be deleted'); END;`).join('\n');
 }
 
-// v2: location-gated scanning, SMS completion codes, weighing, audits and
-// customer holdings statements.
-const V2_SCHEMA = `
+// SMS codes, scan photos, random audits and customer holdings statements.
+const SMS_AUDIT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS phone_verifications (
   id INTEGER PRIMARY KEY,
   subject_kind TEXT NOT NULL CHECK (subject_kind IN ('user','site')),
@@ -338,17 +334,6 @@ CREATE TABLE IF NOT EXISTS holdings_statements (
 );
 `;
 
-// Columns added to v1 tables. Existing databases are upgraded in place.
-const V2_COLUMNS = {
-  users: ['phone_e164 TEXT', 'phone_verified_at TEXT', 'phone_changed_at TEXT'],
-  sites: ['contact_phone_e164 TEXT', 'contact_phone_verified_at TEXT'],
-  inspection_sessions: ['site_id INTEGER', 'loc_lat REAL', 'loc_lng REAL', 'loc_accuracy_m REAL', 'loc_fix_timestamp TEXT',
-    'loc_fix_age_ms INTEGER', 'loc_geofence TEXT', 'loc_distance_m REAL', 'loc_confirmed_at TEXT', 'loc_confirmed_until TEXT',
-    'loc_exception_reason TEXT', 'loc_issue TEXT', 'scan_cylinder_version INTEGER', 'scan_far_m REAL', 'audit_id INTEGER'],
-  events: ['gross_weight_kg REAL', 'net_content_kg REAL', 'scale_id TEXT', 'weight_entered_by INTEGER', 'snapshot_id TEXT',
-    'sms_verified_at TEXT', 'sms_recipient TEXT', 'sms_phone_masked TEXT', 'audit_id INTEGER', 'audit_outcome TEXT'],
-};
-
 const DEFAULT_SETTINGS = {
   max_fix_age_s: '30',              // pilot setting
   max_accuracy_m: '50',             // pilot setting
@@ -381,27 +366,17 @@ const DEFAULT_SETTINGS = {
   statement_valid_days: '7',
 };
 
-// Pre-v2 settings no longer used by the UI. Kept harmless if present.
-const RETIRED_SETTINGS = ['challenge_ttl_s', 'max_clip_seconds', 'min_clip_seconds'];
-
 function open(dataDir) {
-  fs.mkdirSync(path.join(dataDir, 'media'), { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'photos'), { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'snapshots'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'tanktracker.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
-  db.exec(V2_SCHEMA);
-  for (const [table, cols] of Object.entries(V2_COLUMNS)) {
-    const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
-    for (const def of cols) if (!have.has(def.split(' ')[0])) db.exec(`ALTER TABLE ${table} ADD COLUMN ${def}`);
-  }
-  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_phone ON users(phone_e164) WHERE phone_e164 IS NOT NULL');
+  db.exec(SMS_AUDIT_SCHEMA);
   db.exec(appendOnlyTriggers());
   const now = new Date().toISOString();
   const ins = db.prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) ins.run(k, v, now);
-  db.prepare(`DELETE FROM settings WHERE key IN (${RETIRED_SETTINGS.map(() => '?').join(',')})`).run(...RETIRED_SETTINGS);
   return db;
 }
 

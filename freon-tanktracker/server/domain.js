@@ -133,7 +133,7 @@ function recomputeCylinder(db, cylinderId, { bumpVersion = false } = {}) {
 // Review signals computed on the server at submission time.
 function computeFlags(db, settings, ctx) {
   const flags = [];
-  const { cyl, ev, site, mediaSha, mediaId } = ctx;
+  const { cyl, ev, site } = ctx;
   if (ev.geofence_result === 'outside') flags.push(['out_of_geofence', `Fix ${ev.geofence_distance_m} m from site centre (radius ${site.radius_m} m, accuracy ${ev.accuracy_m} m).`]);
   if (ev.geofence_result === 'boundary_uncertain') flags.push(['geofence_uncertain', `Fix near site boundary: ${ev.geofence_distance_m} m from centre, radius ${site.radius_m} m, accuracy ${ev.accuracy_m} m.`]);
   if (ev.geofence_result === 'no_geofence') flags.push(['no_site_geofence', 'Selected site has no geofence configured.']);
@@ -159,12 +159,6 @@ function computeFlags(db, settings, ctx) {
   const recent = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE cylinder_id = ? AND server_received_at >= ?
     AND event_type NOT IN ('correction','registered')`).get(cyl.id, since).n;
   if (recent > 0) flags.push(['repeated_scan', `${recent} other event(s) for this cylinder in the last ${mins} min.`]);
-
-  // Identical media file submitted before.
-  if (mediaSha) {
-    const dup = db.prepare('SELECT id, cylinder_id FROM media WHERE sha256 = ? AND id <> ? LIMIT 1').get(mediaSha, mediaId);
-    if (dup) flags.push(['repeated_media', `Evidence file is byte-identical to earlier media ${dup.id} (cylinder ${dup.cylinder_id}).`]);
-  }
 
   // Unexpected custody changes.
   if (['customer_received', 'warehouse_received', 'empty_returned'].includes(ev.event_type)) {

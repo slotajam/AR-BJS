@@ -1,4 +1,4 @@
-// Browser end-to-end run (Chromium via Playwright) for TankTracker v2.
+// Browser end-to-end run (Chromium via Playwright) for Freon TankTracker.
 //
 // The phone camera is Chromium's fake capture device playing a video of the
 // QR label (a picture, not a real cylinder) — so a successful scan also
@@ -195,7 +195,7 @@ async function main() {
     await dk.goto(`${BASE}/app/dashboard`);
     await dk.waitForSelector('#cyl-table table');
     await dk.screenshot({ path: path.join(OUT, '11-dashboard.png'), fullPage: true });
-    check('dashboard shows v2 sections', (await dk.textContent('main')).includes('Risk summary'));
+    check('dashboard shows risk, audit and statement sections', (await dk.textContent('main')).includes('Risk summary'));
 
     // ---- Thai split screen.
     await op.goto(`${BASE}/app/inspect`);

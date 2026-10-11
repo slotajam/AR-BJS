@@ -1,4 +1,4 @@
-// Acceptance tests for TankTracker v2. Run: npm test
+// Acceptance tests for Freon TankTracker. Run: npm test
 //
 // Exercises the real HTTP API against a fresh database with the development
 // "console" SMS provider: codes are read from its in-memory outbox, exactly
@@ -96,7 +96,7 @@ const submit = (client, sid, overrides = {}, key = crypto.randomUUID()) => clien
 }, { headers: { 'Idempotency-Key': key } });
 const confirm = (client, sid, code) => client.post(`/api/inspections/${sid}/confirm-code`, { code });
 
-// Full v2 flow up to the pending SMS code.
+// Full flow up to the pending SMS code.
 async function upToCode(client, cylId, { siteId = sites.bkk, point = BKK, overrides = {}, qrText } = {}) {
   const sid = await start(client);
   const loc = await confirmLocation(client, sid, siteId, point);

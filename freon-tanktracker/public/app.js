@@ -615,7 +615,7 @@
 
   function stepInfo() {
     const idx = { locate: 0, scan: 1, details: 2, code: 3, done: 4 }[insp.stage];
-    const labels = [t('v2_step1'), t('v2_step2'), t('v2_step3'), t('v2_step4'), t('completed')];
+    const labels = [t('step1_label'), t('step2_label'), t('step3_label'), t('step4_label'), t('completed')];
     const bars = [0, 1, 2, 3].map((i) => `<span class="${i < idx ? 'done' : i === idx ? 'cur' : ''}"></span>`).join('');
     return `<div class="steps">${bars}</div><div class="step-label">${esc(labels[idx])}</div>`;
   }
@@ -994,7 +994,7 @@
     const r = await api('GET', '/api/me/events');
     const awaiting = r.ok ? r.data.events.filter((e) => /pending/.test(e.verification_status)) : [];
     layout(t('pending_submissions'), `
-      <p class="muted small">${esc(t('pending_v2_note'))}</p>
+      <p class="muted small">${esc(t('pending_note'))}</p>
       <div class="section-title">${esc(t('awaiting_review'))}</div>
       ${awaiting.length ? `<div class="card"><ul class="timeline">${awaiting.map((e) => `<li class="pending"><a href="/app/event/${e.id}" data-nav><b>${esc(e.serial)}</b> · ${esc(t('et_' + e.event_type))} ${vsPill(e.verification_status)}<br><span class="muted small">${esc(fmtTime(e.server_received_at))}</span></a></li>`).join('')}</ul></div>`
         : `<p class="muted">${esc(t('no_items'))}</p>`}`, { back: '/' });
@@ -1058,10 +1058,6 @@
         <dt>${esc(t('t_code_sent'))}</dt><dd>${esc(fmtTimeS(e.timeline_detail.code_sent_at))}${e.timeline_detail.code_resends ? ` · ${e.timeline_detail.code_resends}× ${esc(t('resent'))}` : ''}</dd>
         <dt>${esc(t('t_code_ok'))}</dt><dd>${esc(fmtTimeS(e.timeline_detail.code_confirmed_at))}${e.timeline_detail.code_wrong_attempts ? ` · ${e.timeline_detail.code_wrong_attempts} ${esc(t('wrong_attempts'))}` : ''}</dd>
       </dl></div>` : ''}
-      ${e.media ? `<div class="card"><h2>${esc(t('evidence_clip'))} (v1)</h2>
-        ${e.challenge ? `<p>${esc(t('challenge_code'))}: <b style="font-size:22px;letter-spacing:4px">${esc(e.challenge.code)}</b><br><span class="muted small">${esc(t('instruction'))}: ${esc(t('ins_' + e.challenge.instruction_key))}</span></p>` : ''}
-        ${e.media.purged_at ? `<p class="muted">${esc(t('media_purged'))}</p>` : `<video class="evidence" controls playsinline preload="metadata" src="/api/media/${esc(e.media.id)}"></video>`}
-        <p class="muted small">${Math.round(e.media.duration_ms / 1000)} s · ${Math.round(e.media.size_bytes / 1024)} KB · received ${esc(fmtTime(e.media.server_received_at))} · sha256 ${esc(e.media.sha256.slice(0, 12))}…</p></div>` : ''}
       ${e.reference_photos && e.reference_photos.length ? `<div class="card"><h2>${esc(t('reference_photos'))}</h2><div class="photos">${e.reference_photos.map((p) => `<img src="/api/photos/${p.id}" alt="">`).join('')}</div></div>` : ''}
       ${e.checklist ? `<div class="card"><h2>${esc(t('checklist'))}</h2>${Object.entries(e.checklist).map(([k, v]) => `<p class="small">${v ? '☑' : '☐'} ${esc(t('ck_' + k))}</p>`).join('')}</div>` : ''}
       ${e.reviews && e.reviews.length ? `<div class="card"><h2>${esc(t('reviews'))}</h2>${e.reviews.map((rv) => `<p>${vsPill(rv.decision === 'approved' ? 'evidence_reviewed' : 'rejected')} ${esc(rv.reviewer)} · ${esc(fmtTime(rv.created_at))}${rv.reason_code ? ` · ${esc(t('rr_' + rv.reason_code))}` : ''}<br><span class="small">${esc(rv.notes || '')}</span></p>`).join('')}</div>` : ''}

@@ -1,4 +1,4 @@
-// v2 controlled inspection workflow.
+// Controlled inspection workflow.
 //
 //   1. POST /api/inspections                      start (registered + verified phone required)
 //   2. POST /api/inspections/:id/location         server confirms a fresh, accurate fix inside the site
@@ -415,7 +415,7 @@ module.exports = function registerInspection(app, ctx) {
       fix_age_ms: s.loc_fix_age_ms, location_status: payload.location_gate === 'confirmed' ? 'verified' : 'not_verified',
       location_issue: payload.location_gate === 'confirmed' ? null : (s.loc_issue || 'LOCATION_NOT_CONFIRMED'),
       geofence_result: s.loc_geofence || 'not_checked', geofence_distance_m: s.loc_distance_m, qr_token: s.qr_token,
-      qr_verified: s.mode === 'normal' ? 1 : 0, nfc_status: 'not_used', session_id: s.id, challenge_id: null, media_id: null,
+      qr_verified: s.mode === 'normal' ? 1 : 0, nfc_status: 'not_used', session_id: s.id,
       is_exception: isException ? 1 : 0,
       exception_kind: s.mode === 'damaged_label' ? 'damaged_label' : (payload.location_gate === 'exception' ? 'location_unverified' : null),
       exception_reason: isException ? (s.loc_exception_reason || payload.comments) : null,
@@ -426,7 +426,7 @@ module.exports = function registerInspection(app, ctx) {
       audit_id: s.audit_id, audit_outcome: payload.audit_outcome,
     };
     const st = settings();
-    const flags = D.computeFlags(db, st, { cyl, ev, site, mediaSha: null, mediaId: null });
+    const flags = D.computeFlags(db, st, { cyl, ev, site });
     flags.push(...risk.weightFlags(db, st, { cyl, ev }));
     flags.push(...risk.pairFlags(db, st, { ev }));
     if (s.scan_far_m) flags.push(['scan_far_from_confirmed_fix', `Phone moved about ${s.scan_far_m} m between location confirmation and the QR scan.`]);
@@ -452,7 +452,7 @@ module.exports = function registerInspection(app, ctx) {
     const cols = ['cylinder_id', 'event_type', 'movement_status_after', 'user_id', 'responsible_person', 'site_id', 'bay',
       'destination_site_id', 'delivery_ref', 'expected_return_date', 'condition', 'comments', 'checklist_json', 'lat', 'lng',
       'accuracy_m', 'fix_timestamp', 'fix_age_ms', 'location_status', 'location_issue', 'geofence_result', 'geofence_distance_m',
-      'qr_token', 'qr_verified', 'nfc_status', 'session_id', 'challenge_id', 'media_id', 'initial_verification', 'is_exception',
+      'qr_token', 'qr_verified', 'nfc_status', 'session_id', 'initial_verification', 'is_exception',
       'exception_kind', 'exception_reason', 'idempotency_key', 'server_received_at', 'gross_weight_kg', 'net_content_kg', 'scale_id',
       'weight_entered_by', 'snapshot_id', 'sms_verified_at', 'sms_recipient', 'sms_phone_masked', 'audit_id', 'audit_outcome'];
     const info = db.prepare(`INSERT INTO events (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...cols.map((c) => ev[c] ?? null));

@@ -1,8 +1,8 @@
-# Freon TankTracker (v2)
+# Freon TankTracker
 
 Freon TankTracker is a mobile-first web app for refrigerant cylinders. It registers new cylinders, prints unique QR labels and records custody events (dispatch, receipt, return and so on) with evidence. It is built for checking where cylinders sent to upcountry customers were last recorded.
 
-**v2 flow, on one phone screen:**
+**How an event is recorded, on one phone screen:**
 **Bottom half:** the server confirms a fresh, accurate location inside the site. **Top half:** the live QR scanner unlocks. **Finish:** a 4-digit SMS code is sent to a registered phone, and the event is saved only when that code is entered.
 
 > **What it does and does not prove.** The app records the **scanning phone's reported location at events**. It is not live tracking. A QR scan, a location fix, a scan photo and an SMS code together are **not conclusive proof** that the cylinder was present:
@@ -29,7 +29,11 @@ Camera and location need **HTTPS**, except on `localhost`. For a pilot on a loca
 
 | Env var | Purpose |
 |---|---|
-| `PORT`, `DATA_DIR`, `PUBLIC_BASE_URL`, `TLS_CERT`/`TLS_KEY`, `TILE_URL` | as before |
+| `PORT` | listen port (default 3000) |
+| `DATA_DIR` | database, reference photos and scan photos (default `./data`) |
+| `PUBLIC_BASE_URL` | base URL encoded in QR labels and statement links |
+| `TLS_CERT` / `TLS_KEY` | serve HTTPS directly |
+| `TILE_URL` | map tiles (default OpenStreetMap; empty = no tiles, circles still drawn) |
 | `NODE_ENV=production` | refuses the development SMS provider |
 | `SMS_PROVIDER` | `console` (dev default), `twilio`, `thaibulksms`, or `none` (production default: events are refused, never faked) |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` or `TWILIO_MESSAGING_SERVICE_SID` | Twilio |
@@ -57,7 +61,7 @@ What the tests cover:
 - **Customer statements:** single-use link that expires; a dispute needs comments.
 - **Other rules:** driver/customer pair concentration; append-only audit history; SMS provider rules; NFC never simulated.
 
-## How v2 works
+## How it works
 
 **Inspection page (split screen)**
 1. **Location (bottom half).** Live `watchPosition` (high accuracy, `maximumAge: 0`), with a fresh poll every 10 s. It shows a map with an accuracy circle, the fix age and the geofence. The nearest site is pre-selected.
@@ -100,7 +104,15 @@ Any signal sends the event to the supervisor queue. The supervisor sees the scan
   - reconcile cylinder counts against delivery notes and invoices every month;
   - treat audit results as the strongest evidence.
 
-Everything else from v1 is unchanged: roles, append-only history (enforced by SQLite triggers), corrections as new entries, restricted evidence access, retention (now also for scan photos), CSV export, English and Thai. The v1 video evidence step has been removed; existing v1 video records stay readable.
+**Core records**
+- **Roles** (enforced on the server): *Administrator* registers cylinders, prints and replaces labels, manages sites, users, phones and settings. *Operator* records events and exceptions and reports missing cylinders. *Supervisor* reviews the queue, approves or rejects, adds corrections and performs audits. No one can review their own submission.
+- **Registration:** the engraved serial is required and unique; reference photos of the whole cylinder and the serial are stored.
+- **QR labels:** each QR encodes only `PUBLIC_BASE_URL/c/<random token>` (no serial, customer data or coordinates). Labels print singly or in batches, reprints are logged, and replacing a label revokes the old token. Opening the URL with a normal phone camera shows a read-only page and never records a location.
+- **Movement:** dispatch or transfer sets **In transit**; receipt needs its own inspection at the destination. Movement status and verification status (Recorded, Evidence pending review, Evidence reviewed, Exception pending, Rejected) are separate, and so are the latest submitted event and the last approved event. A rejected event never replaces the last approved location.
+- **Exceptions:** damaged label (cylinder chosen by serial, supervisor approval needed), location not confirmed, and missing reports.
+- **Audit trail:** events, reviews, flags, the audit log and label prints are append-only (SQLite triggers abort any change). Corrections are new entries that reference the original. Scan photos are visible only to supervisors, admins and the person who took them, and every view is logged. Retention (default 365 days) purges photos but keeps records.
+- **Dashboard:** counts, cylinders by status and site, overdue returns, cylinders without a recent inspection, map of last approved locations with accuracy circles, filters and CSV export.
+- **Languages:** English and Thai.
 
 ## Needs external services, hardware or native development
 

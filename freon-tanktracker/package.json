@@ -1,6 +1,6 @@
 {
   "name": "freon-tanktracker",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Freon TankTracker - cylinder registration, QR labels, controlled inspection and custody records",
   "main": "server/index.js",
   "scripts": {

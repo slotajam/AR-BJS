@@ -101,7 +101,7 @@ function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) 
       lat: ev.lat, lng: ev.lng, accuracy_m: ev.accuracy_m, fix_timestamp: ev.fix_timestamp, fix_age_ms: ev.fix_age_ms,
       location_status: ev.location_status, location_issue: ev.location_issue,
       geofence_result: ev.geofence_result, geofence_distance_m: ev.geofence_distance_m,
-      qr_verified: !!ev.qr_verified, nfc_status: ev.nfc_status, media_id: ev.media_id,
+      qr_verified: !!ev.qr_verified, nfc_status: ev.nfc_status,
       verification_status: D.effectiveVerification(db, ev), initial_verification: ev.initial_verification,
       is_exception: !!ev.is_exception, exception_kind: ev.exception_kind, exception_reason: ev.exception_reason,
       corrects_event_id: ev.corrects_event_id, corrected_by_event_id: correction ? correction.id : null,
@@ -114,14 +114,6 @@ function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) 
       v.checklist = ev.checklist_json ? JSON.parse(ev.checklist_json) : null;
       v.reviews = db.prepare(`SELECT r.id, r.decision, r.reason_code, r.notes, r.created_at, u.display_name AS reviewer
         FROM reviews r JOIN users u ON u.id = r.reviewer_id WHERE r.event_id = ? ORDER BY r.id`).all(ev.id);
-      if (ev.challenge_id) {
-        const c = db.prepare('SELECT code, instruction_key, issued_at, expires_at, used_at FROM challenges WHERE id = ?').get(ev.challenge_id);
-        v.challenge = c;
-      }
-      if (ev.media_id) {
-        const m = db.prepare('SELECT id, mime, size_bytes, sha256, capture_source, client_started_at, client_stopped_at, duration_ms, server_received_at, purged_at FROM media WHERE id = ?').get(ev.media_id);
-        v.media = m;
-      }
       if (ev.session_id) {
         const ses = db.prepare('SELECT loc_confirmed_at, loc_exception_reason, scan_far_m, created_at FROM inspection_sessions WHERE id = ?').get(ev.session_id);
         const pend = db.prepare("SELECT first_sent_at, last_sent_at, resends, failed_attempts_total FROM pending_submissions WHERE event_id = ?").get(ev.id);
@@ -259,7 +251,7 @@ function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) 
     res.json({ cylinders: rows });
   }));
 
-  // ---------- v2 modules ----------
+  // ---------- inspection, phones, audits, statements ----------
   const ctx = {
     db, dbm, h, fail, str, S, settings, nowIso, randomId, audit, auth, getCyl, getSite, eventView, sms, codes,
     maskPhone, normalizePhone, upload, saveFile, sha, baseUrlFor: baseUrl, nfc,
@@ -281,29 +273,6 @@ function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) 
   }));
 
   // ---------- evidence access (restricted) ----------
-  app.get('/api/media/:id', auth.requireAuth, h((req, res) => {
-    const m = db.prepare('SELECT * FROM media WHERE id = ?').get(String(req.params.id));
-    if (!m) fail(404, 'NOT_FOUND', 'Media not found.');
-    if (!['admin', 'supervisor'].includes(req.user.role) && m.user_id !== req.user.id) fail(403, 'FORBIDDEN', 'You cannot view this evidence.');
-    if (m.purged_at || !m.file) fail(410, 'PURGED', 'Evidence was removed under the retention policy.');
-    audit(req, 'media_viewed', 'media', m.id);
-    const fp = path.join(dataDir, 'media', m.file);
-    const size = fs.statSync(fp).size;
-    res.setHeader('Content-Type', m.mime);
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Accept-Ranges', 'bytes');
-    const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
-    if (range) {
-      const start = range[1] ? Number(range[1]) : 0;
-      const end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
-      res.status(206).setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
-      res.setHeader('Content-Length', end - start + 1);
-      return fs.createReadStream(fp, { start, end }).pipe(res);
-    }
-    res.setHeader('Content-Length', size);
-    fs.createReadStream(fp).pipe(res);
-  }));
-
   // ---------- supervisor review ----------
   const reviewer = auth.requireRole('supervisor', 'admin');
 
@@ -703,22 +672,17 @@ function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) 
     const days = S('evidence_retention_days');
     if (!days) return 0;
     const cutoff = new Date(Date.now() - days * 86400000).toISOString();
-    const rows = db.prepare('SELECT id, file FROM media WHERE purged_at IS NULL AND server_received_at < ?').all(cutoff);
-    for (const m of rows) {
-      try { fs.unlinkSync(path.join(dataDir, 'media', m.file)); } catch (_) { /* already gone */ }
-      db.prepare('UPDATE media SET purged_at = ?, file = NULL WHERE id = ?').run(nowIso(), m.id);
-    }
     const snaps = db.prepare('SELECT id, file FROM snapshots WHERE purged_at IS NULL AND created_at < ?').all(cutoff);
     for (const m of snaps) {
       try { fs.unlinkSync(path.join(dataDir, 'snapshots', m.file)); } catch (_) { /* already gone */ }
       db.prepare('UPDATE snapshots SET purged_at = ?, file = NULL WHERE id = ?').run(nowIso(), m.id);
     }
-    return rows.length + snaps.length;
+    return snaps.length;
   }
 
   app.post('/api/admin/retention/run', admin, h((req, res) => {
     const n = runRetention();
-    audit(req, 'retention_run', 'media', null, { purged: n });
+    audit(req, 'retention_run', 'snapshot', null, { purged: n });
     res.json({ purged: n });
   }));
 
@@ -775,7 +739,7 @@ function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) 
       const st = D.effectiveVerification(db, e);
       if (st in pending) pending[st] += 1;
     }
-    const suspiciousTypes = ['implausible_travel', 'repeated_media', 'repeated_scan', 'unexpected_custody', 'out_of_geofence', 'geofence_uncertain', 'clock_skew',
+    const suspiciousTypes = ['implausible_travel', 'repeated_scan', 'unexpected_custody', 'out_of_geofence', 'geofence_uncertain', 'clock_skew',
       'scan_far_from_confirmed_fix', 'driver_customer_pair_concentration', 'customer_code_entered_very_fast', 'sms_code_failed_attempts', 'audit_not_found', 'audit_mismatch'];
     const suspicious = db.prepare(`SELECT f.event_id, f.flag_type, f.detail, f.created_at, e.cylinder_id, c.serial
       FROM flags f JOIN events e ON e.id = f.event_id JOIN cylinders c ON c.id = e.cylinder_id
