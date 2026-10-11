@@ -254,14 +254,107 @@ CREATE TRIGGER IF NOT EXISTS ${t}_no_delete BEFORE DELETE ON ${t}
 BEGIN SELECT RAISE(ABORT, 'append-only table: ${t} cannot be deleted'); END;`).join('\n');
 }
 
+// v2: location-gated scanning, SMS completion codes, weighing, audits and
+// customer holdings statements.
+const V2_SCHEMA = `
+CREATE TABLE IF NOT EXISTS phone_verifications (
+  id INTEGER PRIMARY KEY,
+  subject_kind TEXT NOT NULL CHECK (subject_kind IN ('user','site')),
+  subject_id INTEGER NOT NULL,
+  phone_e164 TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_by INTEGER,
+  created_at TEXT NOT NULL
+);
+
+-- A submission waiting for its SMS code. The event itself is only written
+-- (append-only) once the code is confirmed.
+CREATE TABLE IF NOT EXISTS pending_submissions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES inspection_sessions(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  cylinder_id TEXT NOT NULL REFERENCES cylinders(id),
+  payload_json TEXT NOT NULL,
+  recipient TEXT NOT NULL CHECK (recipient IN ('operator','site_contact')),
+  phone_e164 TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  failed_attempts_total INTEGER NOT NULL DEFAULT 0,
+  resends INTEGER NOT NULL DEFAULT 0,
+  first_sent_at TEXT NOT NULL,
+  last_sent_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('awaiting','confirmed','expired','burned','send_failed')),
+  idempotency_key TEXT UNIQUE,
+  event_id INTEGER,
+  created_at TEXT NOT NULL,
+  closed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS snapshots (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES inspection_sessions(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  cylinder_id TEXT NOT NULL REFERENCES cylinders(id),
+  file TEXT,
+  mime TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  purged_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audits (
+  id INTEGER PRIMARY KEY,
+  cylinder_id TEXT NOT NULL REFERENCES cylinders(id),
+  risk_score REAL NOT NULL,
+  reasons TEXT,
+  assigned_to INTEGER REFERENCES users(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open','done')),
+  outcome TEXT,
+  outcome_event_id INTEGER,
+  comments TEXT,
+  completed_by INTEGER REFERENCES users(id),
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS holdings_statements (
+  id INTEGER PRIMARY KEY,
+  site_id INTEGER NOT NULL REFERENCES sites(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  cylinders_json TEXT NOT NULL,
+  phone_e164 TEXT NOT NULL,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  response TEXT CHECK (response IN ('confirmed','disputed')),
+  comments TEXT,
+  responded_at TEXT
+);
+`;
+
+// Columns added to v1 tables. Existing databases are upgraded in place.
+const V2_COLUMNS = {
+  users: ['phone_e164 TEXT', 'phone_verified_at TEXT', 'phone_changed_at TEXT'],
+  sites: ['contact_phone_e164 TEXT', 'contact_phone_verified_at TEXT'],
+  inspection_sessions: ['site_id INTEGER', 'loc_lat REAL', 'loc_lng REAL', 'loc_accuracy_m REAL', 'loc_fix_timestamp TEXT',
+    'loc_fix_age_ms INTEGER', 'loc_geofence TEXT', 'loc_distance_m REAL', 'loc_confirmed_at TEXT', 'loc_confirmed_until TEXT',
+    'loc_exception_reason TEXT', 'loc_issue TEXT', 'scan_cylinder_version INTEGER', 'scan_far_m REAL', 'audit_id INTEGER'],
+  events: ['gross_weight_kg REAL', 'net_content_kg REAL', 'scale_id TEXT', 'weight_entered_by INTEGER', 'snapshot_id TEXT',
+    'sms_verified_at TEXT', 'sms_recipient TEXT', 'sms_phone_masked TEXT', 'audit_id INTEGER', 'audit_outcome TEXT'],
+};
+
 const DEFAULT_SETTINGS = {
   max_fix_age_s: '30',              // pilot setting
   max_accuracy_m: '50',             // pilot setting
   geolocation_timeout_s: '20',
   inspection_session_ttl_s: '1800',
-  challenge_ttl_s: '600',
-  max_clip_seconds: '30',
-  min_clip_seconds: '4',
+  location_lock_s: '120',           // scanner stays unlocked this long after a server-confirmed fix
   fast_travel_kmh: '150',
   repeat_scan_minutes: '10',
   inspection_overdue_days: '30',
@@ -269,18 +362,46 @@ const DEFAULT_SETTINGS = {
   evidence_retention_days: '365',
   auto_accept_clean_events: '1',    // clean events count as accepted ("Recorded") until rejected
   clock_skew_tolerance_s: '120',
+  sms_code_ttl_s: '300',
+  sms_code_max_attempts: '5',
+  sms_resend_max: '2',
+  sms_resend_cooldown_s: '60',
+  sms_confirmed_slowly_s: '180',
+  phone_changed_recent_days: '14',
+  auto_snapshot_on_scan: '1',
+  customer_receipt_code_to_site_contact: '1',
+  require_weight_at_warehouse: '1',
+  weight_tolerance_kg: '0.2',
+  unused_after_days: '7',
+  audits_per_week: '5',
+  audit_independence_days: '90',
+  pair_concentration_pct: '70',
+  pair_min_events: '5',
+  holdings_statement_days: '30',
+  statement_valid_days: '7',
 };
+
+// Pre-v2 settings no longer used by the UI. Kept harmless if present.
+const RETIRED_SETTINGS = ['challenge_ttl_s', 'max_clip_seconds', 'min_clip_seconds'];
 
 function open(dataDir) {
   fs.mkdirSync(path.join(dataDir, 'media'), { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'photos'), { recursive: true });
+  fs.mkdirSync(path.join(dataDir, 'snapshots'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'tanktracker.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  db.exec(V2_SCHEMA);
+  for (const [table, cols] of Object.entries(V2_COLUMNS)) {
+    const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+    for (const def of cols) if (!have.has(def.split(' ')[0])) db.exec(`ALTER TABLE ${table} ADD COLUMN ${def}`);
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_phone ON users(phone_e164) WHERE phone_e164 IS NOT NULL');
   db.exec(appendOnlyTriggers());
   const now = new Date().toISOString();
   const ins = db.prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) ins.run(k, v, now);
+  db.prepare(`DELETE FROM settings WHERE key IN (${RETIRED_SETTINGS.map(() => '?').join(',')})`).run(...RETIRED_SETTINGS);
   return db;
 }
 

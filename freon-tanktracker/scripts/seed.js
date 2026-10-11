@@ -38,3 +38,4 @@ for (const s of sites) {
 }
 console.log(`Sites: ${db.prepare('SELECT COUNT(*) AS n FROM sites').get().n}`);
 console.log('Change all passwords after first login (Admin > Users).');
+console.log('Next: register each user\'s mobile number (Admin > Users) and have them verify it under "My phone".');

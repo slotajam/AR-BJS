@@ -10,15 +10,19 @@ const dbm = require('./db');
 const auth = require('./auth');
 const nfc = require('./nfc');
 const D = require('./domain');
+const risk = require('./risk');
+const smsLib = require('./sms');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-const INSTRUCTIONS = ['whole_then_serial', 'qr_serial_valve', 'walk_around'];
-const REJECT_REASONS = ['screen_or_photo_suspected', 'code_not_spoken', 'serial_not_visible', 'wrong_cylinder',
-  'clip_not_continuous', 'location_implausible', 'other'];
+const REJECT_REASONS = ['screen_or_photo_suspected', 'snapshot_not_cylinder', 'serial_not_visible', 'wrong_cylinder',
+  'location_implausible', 'weight_mismatch', 'custody_doubt', 'other'];
 
-function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
+function createApp({ dataDir, publicBaseUrl, tileUrl, env = process.env } = {}) {
   const db = dbm.open(dataDir);
+  const sms = smsLib.createSms(env);
+  const codes = smsLib.codeHasher(smsLib.loadSecret(dataDir));
+  const { maskPhone, normalizePhone } = smsLib;
   const app = express();
   app.set('trust proxy', 'loopback, linklocal, uniquelocal');
   app.disable('x-powered-by');
@@ -68,7 +72,7 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
   const fail = (status, code, message, extra) => { throw new D.RuleError(status, code, message, extra); };
   const str = (v, max = 200) => (v == null ? '' : String(v).trim().slice(0, max));
 
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 80 * 1024 * 1024, files: 6 } });
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024, files: 4 } });
 
   function saveFile(subdir, buf, ext) {
     const name = `${randomId(18)}${ext}`;
@@ -102,6 +106,9 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
       is_exception: !!ev.is_exception, exception_kind: ev.exception_kind, exception_reason: ev.exception_reason,
       corrects_event_id: ev.corrects_event_id, corrected_by_event_id: correction ? correction.id : null,
       server_received_at: ev.server_received_at, flags,
+      gross_weight_kg: ev.gross_weight_kg, net_content_kg: ev.net_content_kg, scale_id: ev.scale_id, snapshot_id: ev.snapshot_id,
+      sms_verified_at: ev.sms_verified_at, sms_recipient: ev.sms_recipient, sms_phone_masked: ev.sms_phone_masked,
+      audit_id: ev.audit_id, audit_outcome: ev.audit_outcome,
     };
     if (full) {
       v.checklist = ev.checklist_json ? JSON.parse(ev.checklist_json) : null;
@@ -114,6 +121,16 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
       if (ev.media_id) {
         const m = db.prepare('SELECT id, mime, size_bytes, sha256, capture_source, client_started_at, client_stopped_at, duration_ms, server_received_at, purged_at FROM media WHERE id = ?').get(ev.media_id);
         v.media = m;
+      }
+      if (ev.session_id) {
+        const ses = db.prepare('SELECT loc_confirmed_at, loc_exception_reason, scan_far_m, created_at FROM inspection_sessions WHERE id = ?').get(ev.session_id);
+        const pend = db.prepare("SELECT first_sent_at, last_sent_at, resends, failed_attempts_total FROM pending_submissions WHERE event_id = ?").get(ev.id);
+        v.timeline_detail = {
+          session_started_at: ses && ses.created_at, location_confirmed_at: ses && ses.loc_confirmed_at,
+          location_exception_reason: ses && ses.loc_exception_reason, scan_far_m: ses && ses.scan_far_m,
+          code_sent_at: pend && pend.first_sent_at, code_resends: pend ? pend.resends : null,
+          code_wrong_attempts: pend ? pend.failed_attempts_total : null, code_confirmed_at: ev.sms_verified_at,
+        };
       }
       const photos = db.prepare('SELECT id, kind FROM cylinder_photos WHERE cylinder_id = ? ORDER BY id').all(ev.cylinder_id);
       v.reference_photos = photos;
@@ -194,8 +211,10 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
     const s = settings();
     res.json({
       max_fix_age_s: Number(s.max_fix_age_s), max_accuracy_m: Number(s.max_accuracy_m),
-      geolocation_timeout_s: Number(s.geolocation_timeout_s), max_clip_seconds: Number(s.max_clip_seconds),
-      min_clip_seconds: Number(s.min_clip_seconds), tile_url: tileUrl || '', nfc_verifier: nfc.verifierConfigured(),
+      geolocation_timeout_s: Number(s.geolocation_timeout_s),
+      location_lock_s: Number(s.location_lock_s), snapshot_required: s.auto_snapshot_on_scan === '1',
+      require_weight: s.require_weight_at_warehouse === '1', sms_provider: sms.name, sms_dev: !!sms.isDev, sms_available: !sms.unavailable,
+      tile_url: tileUrl || '', nfc_verifier: nfc.verifierConfigured(),
       secure_context_hint: req.secure || ['localhost', '127.0.0.1'].includes(req.hostname),
     });
   });
@@ -240,292 +259,25 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
     res.json({ cylinders: rows });
   }));
 
-  // ---------- controlled inspection workflow ----------
-  function issueChallenge(session, cyl) {
-    const id = randomId(18);
-    const code = String(crypto.randomInt(1000, 10000));
-    const instruction = INSTRUCTIONS[crypto.randomInt(0, INSTRUCTIONS.length)];
-    const issued = new Date();
-    const expires = new Date(issued.getTime() + S('challenge_ttl_s') * 1000);
-    db.prepare(`INSERT INTO challenges (id, session_id, user_id, cylinder_id, code, instruction_key, cylinder_version, issued_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, session.id, session.user_id, cyl.id, code, instruction, cyl.version, issued.toISOString(), expires.toISOString());
-    return { id, code, instruction_key: instruction, issued_at: issued.toISOString(), expires_at: expires.toISOString() };
-  }
+  // ---------- v2 modules ----------
+  const ctx = {
+    db, dbm, h, fail, str, S, settings, nowIso, randomId, audit, auth, getCyl, getSite, eventView, sms, codes,
+    maskPhone, normalizePhone, upload, saveFile, sha, baseUrlFor: baseUrl, nfc,
+  };
+  require('./inspection')(app, ctx);
+  require('./phone')(app, ctx);
+  require('./audits')(app, ctx);
+  require('./statements')(app, ctx);
 
-  function getOpenSession(req) {
-    const s = db.prepare('SELECT * FROM inspection_sessions WHERE id = ?').get(String(req.params.id));
-    if (!s || s.user_id !== req.user.id) fail(404, 'SESSION_NOT_FOUND', 'Inspection session not found.');
-    if (s.status !== 'open') fail(409, 'SESSION_CLOSED', `Inspection session is ${s.status}. Start a new inspection.`);
-    if (s.expires_at <= nowIso()) {
-      db.prepare("UPDATE inspection_sessions SET status = 'expired' WHERE id = ?").run(s.id);
-      fail(410, 'SESSION_EXPIRED', 'Inspection session expired. Start a new inspection.');
-    }
-    return s;
-  }
-
-  function cylinderBrief(cyl) {
-    return {
-      id: cyl.id, serial: cyl.serial, gas_type: cyl.gas_type, size: cyl.size, brand_owner: cyl.brand_owner,
-      movement_status: cyl.movement_status, current_site_id: cyl.current_site_id, destination_site_id: cyl.destination_site_id,
-      photos: db.prepare('SELECT id, kind FROM cylinder_photos WHERE cylinder_id = ? ORDER BY id').all(cyl.id),
-    };
-  }
-
-  app.post('/api/inspections', auth.requireRole('operator', 'supervisor', 'admin'), h((req, res) => {
-    const id = randomId(18);
-    const now = new Date();
-    const exp = new Date(now.getTime() + S('inspection_session_ttl_s') * 1000);
-    db.prepare(`INSERT INTO inspection_sessions (id, user_id, mode, status, created_at, expires_at) VALUES (?, ?, 'normal', 'open', ?, ?)`)
-      .run(id, req.user.id, now.toISOString(), exp.toISOString());
-    audit(req, 'inspection_started', 'inspection_session', id);
-    res.status(201).json({ session: { id, mode: 'normal', expires_at: exp.toISOString() } });
-  }));
-
-  // Step 3: the QR text decoded by the in-app live camera scanner.
-  app.post('/api/inspections/:id/scan', auth.requireRole('operator', 'supervisor', 'admin'), h((req, res) => {
-    const s = getOpenSession(req);
-    if (s.mode !== 'normal') fail(409, 'WRONG_MODE', 'This session does not use QR scanning.');
-    if (req.body.scan_method !== 'live_camera') fail(422, 'LIVE_SCAN_REQUIRED', 'The QR must be scanned with the in-app live camera.');
-    const text = str(req.body.qr_text, 500);
-    const m = text.match(/\/c\/([A-Za-z0-9_-]{20,64})\/?$/);
-    if (!m) fail(422, 'QR_NOT_TANKTRACKER', 'This QR code is not a TankTracker cylinder label.');
-    const qr = db.prepare('SELECT * FROM qr_codes WHERE token = ?').get(m[1]);
-    if (!qr) fail(404, 'QR_UNKNOWN', 'This QR code is not recognised.');
-    if (qr.status !== 'active') {
-      audit(req, 'revoked_qr_scanned', 'qr', qr.token, { cylinder: qr.cylinder_id });
-      fail(410, 'QR_REVOKED', 'This label has been revoked or replaced. Do not use it. Report to a supervisor.');
-    }
-    const cyl = getCyl(qr.cylinder_id);
-    if (cyl.movement_status === 'retired') fail(409, 'CYLINDER_RETIRED', 'This cylinder is retired.');
-    db.prepare("UPDATE inspection_sessions SET cylinder_id = ?, qr_token = ?, scan_method = 'live_camera' WHERE id = ?").run(cyl.id, qr.token, s.id);
-    const challenge = issueChallenge(s, cyl);
-    audit(req, 'qr_scanned', 'cylinder', cyl.id, { session: s.id });
-    res.json({ cylinder: cylinderBrief(cyl), challenge });
-  }));
-
-  // Supervisor-controlled exception flow for a damaged / unreadable label.
-  // Manual serial lookup is allowed here only; the result is always
-  // "Exception pending" and needs supervisor approval.
-  app.post('/api/exceptions/damaged-label', auth.requireRole('operator', 'supervisor', 'admin'), h((req, res) => {
-    const cyl = getCyl(str(req.body.cylinder_id, 40));
-    if (!cyl) fail(404, 'NOT_FOUND', 'Cylinder not found.');
-    if (cyl.movement_status === 'retired') fail(409, 'CYLINDER_RETIRED', 'This cylinder is retired.');
-    const id = randomId(18);
-    const now = new Date();
-    const exp = new Date(now.getTime() + S('inspection_session_ttl_s') * 1000);
-    db.prepare(`INSERT INTO inspection_sessions (id, user_id, mode, status, cylinder_id, scan_method, created_at, expires_at)
-      VALUES (?, ?, 'damaged_label', 'open', ?, 'manual_serial_exception', ?, ?)`).run(id, req.user.id, cyl.id, now.toISOString(), exp.toISOString());
-    const session = db.prepare('SELECT * FROM inspection_sessions WHERE id = ?').get(id);
-    const challenge = issueChallenge(session, cyl);
-    audit(req, 'damaged_label_exception_started', 'cylinder', cyl.id, { session: id });
-    res.status(201).json({ session: { id, mode: 'damaged_label', expires_at: exp.toISOString() }, cylinder: cylinderBrief(cyl), challenge });
-  }));
-
-  app.post('/api/inspections/:id/challenge', auth.requireRole('operator', 'supervisor', 'admin'), h((req, res) => {
-    const s = getOpenSession(req);
-    if (!s.cylinder_id) fail(409, 'NO_CYLINDER', 'Scan the cylinder first.');
-    const challenge = issueChallenge(s, getCyl(s.cylinder_id));
-    res.json({ challenge });
-  }));
-
-  app.post('/api/inspections/:id/cancel', auth.requireAuth, h((req, res) => {
-    const s = getOpenSession(req);
-    db.prepare("UPDATE inspection_sessions SET status = 'cancelled' WHERE id = ?").run(s.id);
-    res.json({ ok: true });
-  }));
-
-  // Step 6: fresh evidence clip recorded in-app with MediaRecorder.
-  app.post('/api/inspections/:id/media', auth.requireRole('operator', 'supervisor', 'admin'), upload.single('clip'), h((req, res) => {
-    const s = getOpenSession(req);
-    const ch = db.prepare('SELECT * FROM challenges WHERE id = ? AND session_id = ?').get(str(req.body.challenge_id, 64), s.id);
-    if (!ch || ch.user_id !== req.user.id) fail(404, 'CHALLENGE_NOT_FOUND', 'Challenge not found for this session.');
-    if (ch.used_at) fail(409, 'CHALLENGE_USED', 'This challenge has already been used. Start a new inspection.');
-    const now = new Date();
-    if (ch.expires_at <= now.toISOString()) fail(410, 'CHALLENGE_EXPIRED', 'The challenge expired. Request a new code and record again.');
-    if (db.prepare('SELECT 1 FROM media WHERE challenge_id = ?').get(ch.id)) fail(409, 'MEDIA_EXISTS', 'Evidence already uploaded for this challenge. Request a new code to record again.');
-    if (req.body.capture_source !== 'live_camera_recorder') fail(422, 'LIVE_CAPTURE_REQUIRED', 'Evidence must be recorded with the in-app camera. Uploads from the gallery are not accepted.');
-    const f = req.file;
-    if (!f || !f.buffer || f.size < 1000) fail(422, 'EVIDENCE_REQUIRED', 'Record a video clip of the cylinder.');
-    if (!/^video\/(webm|mp4|quicktime)/.test(f.mimetype)) fail(422, 'VIDEO_REQUIRED', 'Evidence must be a video recording.');
-    const duration = Number(req.body.duration_ms);
-    if (!Number.isFinite(duration) || duration < S('min_clip_seconds') * 1000 || duration > (S('max_clip_seconds') + 2) * 1000) {
-      fail(422, 'CLIP_DURATION', `Clip must be between ${S('min_clip_seconds')} and ${S('max_clip_seconds')} seconds.`);
-    }
-    // A clip cannot be longer than the time since the challenge was issued.
-    if (now.getTime() - Date.parse(ch.issued_at) + 3000 < duration) {
-      fail(422, 'CLIP_PREDATES_CHALLENGE', 'Clip is longer than the time since the challenge code was issued.');
-    }
-    const digest = sha(f.buffer);
-    const ext = f.mimetype.includes('mp4') ? '.mp4' : f.mimetype.includes('quicktime') ? '.mov' : '.webm';
-    const file = saveFile('media', f.buffer, ext);
-    const id = randomId(12);
-    db.prepare(`INSERT INTO media (id, challenge_id, session_id, user_id, cylinder_id, file, mime, size_bytes, sha256, capture_source,
-      client_started_at, client_stopped_at, duration_ms, server_received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, ch.id, s.id, req.user.id, ch.cylinder_id, file, f.mimetype.split(';')[0], f.size, digest, 'live_camera_recorder',
-        str(req.body.started_at, 40) || null, str(req.body.stopped_at, 40) || null, Math.round(duration), now.toISOString());
-    res.status(201).json({ media: { id, sha256: digest, server_received_at: now.toISOString() } });
-  }));
-
-  app.post('/api/inspections/:id/nfc', auth.requireAuth, h((req, res) => {
-    getOpenSession(req);
-    const r = nfc.verifySunMessage({ message: req.body.message });
-    res.status(501).json({ error: 'NFC_NOT_CONFIGURED', message: r.reason });
-  }));
-
-  function evaluateLocation(loc, receivedAt) {
-    if (!loc || typeof loc !== 'object') return { ok: false, issue: 'LOCATION_MISSING', message: 'No location fix was provided.' };
-    const lat = Number(loc.lat);
-    const lng = Number(loc.lng);
-    const acc = Number(loc.accuracy_m);
-    const fixTs = Date.parse(loc.fix_timestamp);
-    const clientNow = Date.parse(loc.client_sent_at);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180 || !Number.isFinite(acc) || acc < 0
-      || !Number.isFinite(fixTs) || !Number.isFinite(clientNow)) {
-      return { ok: false, issue: 'LOCATION_INVALID', message: 'Location data is incomplete.' };
-    }
-    const base = { lat, lng, accuracy_m: Math.round(acc * 10) / 10, fix_timestamp: new Date(fixTs).toISOString() };
-    // Fix age is measured on the phone's own clock (fix time vs send time)
-    // plus the network delay seen by the server.
-    const skewMs = receivedAt - clientNow;
-    const ageMs = Math.max(0, clientNow - fixTs) + Math.max(0, Math.min(skewMs, 10000));
-    base.fix_age_ms = Math.round(ageMs);
-    if (Math.abs(skewMs) > S('clock_skew_tolerance_s') * 1000) base.clock_skew_s = Math.round(skewMs / 1000);
-    if (ageMs > S('max_fix_age_s') * 1000) return { ...base, ok: false, issue: 'LOCATION_STALE', message: `Location fix is ${Math.round(ageMs / 1000)} s old (limit ${S('max_fix_age_s')} s). Acquire a fresh fix.` };
-    if (acc > S('max_accuracy_m')) return { ...base, ok: false, issue: 'LOCATION_INACCURATE', message: `Reported accuracy ${Math.round(acc)} m is worse than the ${S('max_accuracy_m')} m limit.` };
-    return { ...base, ok: true };
-  }
-
-  // Step 8: submit. Validates everything on the server and applies the
-  // state change atomically.
-  app.post('/api/inspections/:id/submit', auth.requireRole('operator', 'supervisor', 'admin'), h((req, res) => {
-    const key = str(req.get('Idempotency-Key'), 100);
-    if (key.length < 8) fail(422, 'IDEMPOTENCY_KEY', 'Missing Idempotency-Key header.');
-    const prior = db.prepare('SELECT * FROM events WHERE idempotency_key = ?').get(key);
-    if (prior) {
-      if (prior.user_id !== req.user.id) fail(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency key already used.');
-      return res.status(200).json({ event: eventView(prior), replayed: true });
-    }
-    const b = req.body || {};
-    const receivedAt = Date.now();
-    const result = dbm.tx(db, () => {
-      // A used challenge is rejected even if its session is already closed.
-      const used = db.prepare('SELECT used_at FROM challenges WHERE id = ? AND user_id = ?').get(str(b.challenge_id, 64), req.user.id);
-      if (used && used.used_at) fail(409, 'CHALLENGE_USED', 'This challenge has already been used. Start a new inspection.');
-      const s = getOpenSession(req);
-      if (!s.cylinder_id) fail(409, 'NO_CYLINDER', 'Scan the cylinder first.');
-      const ch = db.prepare('SELECT * FROM challenges WHERE id = ? AND session_id = ?').get(str(b.challenge_id, 64), s.id);
-      if (!ch || ch.user_id !== req.user.id) fail(404, 'CHALLENGE_NOT_FOUND', 'Challenge not found for this session.');
-      if (ch.used_at) fail(409, 'CHALLENGE_USED', 'This challenge has already been used.');
-      if (ch.expires_at <= new Date(receivedAt).toISOString()) fail(410, 'CHALLENGE_EXPIRED', 'The challenge expired. Request a new code and record new evidence.');
-      const media = db.prepare('SELECT * FROM media WHERE challenge_id = ?').get(ch.id);
-      if (!media) fail(422, 'EVIDENCE_REQUIRED', 'Record the evidence clip for this challenge before submitting.');
-
-      let qrVerified = 0;
-      if (s.mode === 'normal') {
-        const qr = db.prepare('SELECT * FROM qr_codes WHERE token = ?').get(s.qr_token);
-        if (!qr || qr.status !== 'active') fail(410, 'QR_REVOKED', 'The scanned label is no longer active.');
-        qrVerified = 1;
-      }
-      const cyl = getCyl(s.cylinder_id);
-      if (cyl.version !== ch.cylinder_version) {
-        fail(409, 'CONCURRENT_UPDATE', 'Another event was recorded for this cylinder after you started. Start a new inspection to see its current state.');
-      }
-
-      const eventType = str(b.event_type, 40);
-      if (!D.INSPECTION_EVENT_TYPES.includes(eventType)) fail(422, 'EVENT_TYPE', 'Select a valid event type.');
-      const site = getSite(b.site_id);
-      if (!site || !site.active) fail(422, 'SITE_REQUIRED', 'Select the site where the cylinder is.');
-      const destination = b.destination_site_id ? getSite(b.destination_site_id) : null;
-      if (b.destination_site_id && (!destination || !destination.active)) fail(422, 'DESTINATION_INVALID', 'Destination site not found.');
-
-      const checklist = b.checklist || {};
-      const required = s.mode === 'damaged_label' ? D.CHECKLIST_KEYS.filter((k) => k !== 'qr_attached') : D.CHECKLIST_KEYS;
-      const missing = required.filter((k) => checklist[k] !== true);
-      if (missing.length) fail(422, 'CHECKLIST_INCOMPLETE', 'Confirm every checklist item.', { missing });
-      const condition = str(b.condition, 30);
-      if (!D.CONDITIONS.includes(condition)) fail(422, 'CONDITION_REQUIRED', 'Select the cylinder condition.');
-      const comments = str(b.comments, 2000);
-      if (condition !== 'good' && comments.length < 5) fail(422, 'COMMENTS_REQUIRED', 'Describe the problem in the comments.');
-
-      const exceptionReason = str(b.exception_reason, 500);
-      const isException = s.mode === 'damaged_label' || !!b.location_exception;
-      if (s.mode === 'damaged_label' && comments.length < 5) fail(422, 'COMMENTS_REQUIRED', 'Describe the label damage in the comments.');
-
-      const loc = evaluateLocation(b.location, receivedAt);
-      if (!isException && !loc.ok) {
-        fail(422, loc.issue, loc.message, { location_issue: loc.issue, exception_allowed: true });
-      }
-      if (b.location_exception && exceptionReason.length < 5) fail(422, 'EXCEPTION_REASON_REQUIRED', 'Explain why location could not be verified.');
-
-      const movement = D.applyMovement(eventType, cyl, site, destination);
-      const hasCoords = loc.lat != null;
-      const geo = hasCoords ? D.checkGeofence(site, loc.lat, loc.lng, loc.accuracy_m) : { result: 'not_checked', distance: null };
-      const ev = {
-        cylinder_id: cyl.id, event_type: eventType, movement_status_after: movement, user_id: req.user.id,
-        responsible_person: str(b.responsible_person, 120) || req.user.display_name, site_id: site.id, bay: str(b.bay, 60),
-        destination_site_id: destination ? destination.id : null, delivery_ref: str(b.delivery_ref, 80) || null,
-        expected_return_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.expected_return_date || '')) ? b.expected_return_date : null,
-        condition, comments: comments || null, checklist_json: JSON.stringify(Object.fromEntries(D.CHECKLIST_KEYS.map((k) => [k, checklist[k] === true]))),
-        lat: hasCoords ? loc.lat : null, lng: hasCoords ? loc.lng : null, accuracy_m: hasCoords ? loc.accuracy_m : null,
-        fix_timestamp: hasCoords ? loc.fix_timestamp : null, fix_age_ms: hasCoords ? loc.fix_age_ms : null,
-        location_status: loc.ok ? 'verified' : 'not_verified', location_issue: loc.ok ? null : loc.issue,
-        geofence_result: geo.result, geofence_distance_m: geo.distance, qr_token: s.qr_token, qr_verified: qrVerified,
-        nfc_status: 'not_used', session_id: s.id, challenge_id: ch.id, media_id: media.id,
-        is_exception: isException ? 1 : 0, exception_kind: s.mode === 'damaged_label' ? 'damaged_label' : (b.location_exception ? 'location_unverified' : null),
-        exception_reason: isException ? (exceptionReason || comments) : null, idempotency_key: key,
-        server_received_at: new Date(receivedAt).toISOString(), clock_skew_s: loc.clock_skew_s,
-      };
-      const flags = D.computeFlags(db, settings(), { cyl, ev, site, mediaSha: media.sha256, mediaId: media.id });
-      const st = settings();
-      let initial;
-      if (isException) initial = 'exception_pending';
-      else if (flags.length || st.auto_accept_clean_events !== '1') initial = 'evidence_pending';
-      else initial = 'recorded';
-      ev.initial_verification = initial;
-
-      const cols = ['cylinder_id', 'event_type', 'movement_status_after', 'user_id', 'responsible_person', 'site_id', 'bay',
-        'destination_site_id', 'delivery_ref', 'expected_return_date', 'condition', 'comments', 'checklist_json', 'lat', 'lng',
-        'accuracy_m', 'fix_timestamp', 'fix_age_ms', 'location_status', 'location_issue', 'geofence_result', 'geofence_distance_m',
-        'qr_token', 'qr_verified', 'nfc_status', 'session_id', 'challenge_id', 'media_id', 'initial_verification', 'is_exception',
-        'exception_kind', 'exception_reason', 'idempotency_key', 'server_received_at'];
-      const info = db.prepare(`INSERT INTO events (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...cols.map((c) => ev[c] ?? null));
-      const eventId = Number(info.lastInsertRowid);
-      const insFlag = db.prepare('INSERT INTO flags (event_id, flag_type, detail, created_at) VALUES (?, ?, ?, ?)');
-      for (const [t, d] of flags) insFlag.run(eventId, t, d, ev.server_received_at);
-      db.prepare('UPDATE challenges SET used_at = ? WHERE id = ?').run(ev.server_received_at, ch.id);
-      db.prepare("UPDATE inspection_sessions SET status = 'submitted' WHERE id = ?").run(s.id);
-      D.recomputeCylinder(db, cyl.id, { bumpVersion: true });
-      audit(req, 'event_submitted', 'event', eventId, { cylinder: cyl.id, type: eventType, verification: initial });
-      return db.prepare('SELECT * FROM events WHERE id = ?').get(eventId);
-    });
-    res.status(201).json({ event: eventView(result, { full: true }) });
-  }));
-
-  // Missing report: the cylinder cannot be scanned, so no location is verified.
-  app.post('/api/cylinders/:id/missing', auth.requireRole('operator', 'supervisor', 'admin'), h((req, res) => {
-    const key = str(req.get('Idempotency-Key'), 100);
-    if (key.length < 8) fail(422, 'IDEMPOTENCY_KEY', 'Missing Idempotency-Key header.');
-    const prior = db.prepare('SELECT * FROM events WHERE idempotency_key = ?').get(key);
-    if (prior) return res.json({ event: eventView(prior), replayed: true });
-    const comments = str(req.body.comments, 2000);
-    if (comments.length < 5) fail(422, 'COMMENTS_REQUIRED', 'Describe where the cylinder was expected and what was checked.');
-    const ev = dbm.tx(db, () => {
-      const cyl = getCyl(req.params.id);
-      if (!cyl) fail(404, 'NOT_FOUND', 'Cylinder not found.');
-      if (['retired', 'missing'].includes(cyl.movement_status)) fail(409, 'INVALID_STATE', `Cylinder is already ${cyl.movement_status}.`);
-      const site = getSite(req.body.site_id) || getSite(cyl.current_site_id);
-      const t = nowIso();
-      const info = db.prepare(`INSERT INTO events (cylinder_id, event_type, movement_status_after, user_id, responsible_person, site_id, comments,
-        location_status, geofence_result, initial_verification, is_exception, exception_kind, exception_reason, idempotency_key, server_received_at)
-        VALUES (?, 'missing_reported', 'missing', ?, ?, ?, ?, 'not_applicable', 'not_checked', 'exception_pending', 1, 'missing_reported', ?, ?, ?)`)
-        .run(cyl.id, req.user.id, req.user.display_name, site ? site.id : null, comments, comments, key, t);
-      const id = Number(info.lastInsertRowid);
-      db.prepare('INSERT INTO flags (event_id, flag_type, detail, created_at) VALUES (?, ?, ?, ?)').run(id, 'exception', 'missing_reported', t);
-      D.recomputeCylinder(db, cyl.id, { bumpVersion: true });
-      audit(req, 'missing_reported', 'event', id, { cylinder: cyl.id });
-      return db.prepare('SELECT * FROM events WHERE id = ?').get(id);
-    });
-    res.status(201).json({ event: eventView(ev) });
+  app.get('/api/snapshots/:id', auth.requireAuth, h((req, res) => {
+    const m = db.prepare('SELECT * FROM snapshots WHERE id = ?').get(String(req.params.id));
+    if (!m) fail(404, 'NOT_FOUND', 'Snapshot not found.');
+    if (!['admin', 'supervisor'].includes(req.user.role) && m.user_id !== req.user.id) fail(403, 'FORBIDDEN', 'You cannot view this evidence.');
+    if (m.purged_at || !m.file) fail(410, 'PURGED', 'Evidence was removed under the retention policy.');
+    audit(req, 'snapshot_viewed', 'snapshot', m.id);
+    res.setHeader('Content-Type', m.mime);
+    res.setHeader('Cache-Control', 'private, no-store');
+    fs.createReadStream(path.join(dataDir, 'snapshots', m.file)).pipe(res);
   }));
 
   // ---------- evidence access (restricted) ----------
@@ -849,7 +601,9 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
       customer_name: str(b.customer_name, 120) || null, address: str(b.address, 300) || null,
       lat: b.lat === '' || b.lat == null ? null : Number(b.lat), lng: b.lng === '' || b.lng == null ? null : Number(b.lng),
       radius_m: b.radius_m === '' || b.radius_m == null ? null : Number(b.radius_m), active: b.active === false || b.active === 0 ? 0 : 1,
+      contact_phone_e164: b.contact_phone ? normalizePhone(b.contact_phone) : null,
     };
+    if (b.contact_phone && !f.contact_phone_e164) fail(422, 'PHONE_INVALID', 'Enter a valid contact mobile number.');
     if (!f.code || !f.name) fail(422, 'FIELD_REQUIRED', 'Code and name are required.');
     if ((f.lat != null && (!Number.isFinite(f.lat) || Math.abs(f.lat) > 90)) || (f.lng != null && (!Number.isFinite(f.lng) || Math.abs(f.lng) > 180))) fail(422, 'COORDS', 'Invalid geofence centre.');
     if (f.radius_m != null && (!Number.isFinite(f.radius_m) || f.radius_m < 10 || f.radius_m > 20000)) fail(422, 'RADIUS', 'Radius must be 10–20000 m.');
@@ -858,22 +612,29 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
 
   app.post('/api/admin/sites', admin, h((req, res) => {
     const f = siteFields(req.body);
-    const info = db.prepare(`INSERT INTO sites (code, name, kind, customer_name, address, lat, lng, radius_m, active, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(f.code, f.name, f.kind, f.customer_name, f.address, f.lat, f.lng, f.radius_m, f.active, nowIso());
+    const info = db.prepare(`INSERT INTO sites (code, name, kind, customer_name, address, lat, lng, radius_m, active, contact_phone_e164, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(f.code, f.name, f.kind, f.customer_name, f.address, f.lat, f.lng, f.radius_m, f.active, f.contact_phone_e164, nowIso());
     audit(req, 'site_created', 'site', info.lastInsertRowid, f);
     res.status(201).json({ id: Number(info.lastInsertRowid) });
   }));
 
   app.put('/api/admin/sites/:id', admin, h((req, res) => {
     const f = siteFields(req.body);
+    const before = db.prepare('SELECT contact_phone_e164 FROM sites WHERE id = ?').get(Number(req.params.id));
+    if (!before) fail(404, 'NOT_FOUND', 'Site not found.');
     db.prepare(`UPDATE sites SET code = ?, name = ?, kind = ?, customer_name = ?, address = ?, lat = ?, lng = ?, radius_m = ?, active = ? WHERE id = ?`)
       .run(f.code, f.name, f.kind, f.customer_name, f.address, f.lat, f.lng, f.radius_m, f.active, Number(req.params.id));
+    if (f.contact_phone_e164 !== before.contact_phone_e164) {
+      db.prepare('UPDATE sites SET contact_phone_e164 = ?, contact_phone_verified_at = NULL WHERE id = ?').run(f.contact_phone_e164, Number(req.params.id));
+    }
     audit(req, 'site_updated', 'site', req.params.id, f);
     res.json({ ok: true });
   }));
 
   app.get('/api/admin/users', staff, (req, res) => {
-    res.json({ users: db.prepare('SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id').all() });
+    const rows = db.prepare('SELECT id, username, display_name, role, active, created_at, phone_e164, phone_verified_at FROM users ORDER BY id').all();
+    const isAdmin = req.user.role === 'admin';
+    res.json({ users: rows.map(({ phone_e164: ph, phone_verified_at: pv, ...u }) => ({ ...u, phone: isAdmin ? ph : undefined, phone_masked: maskPhone(ph), phone_verified: !!pv })) });
   });
 
   app.post('/api/admin/users', admin, h((req, res) => {
@@ -883,8 +644,11 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
     if (!['admin', 'operator', 'supervisor'].includes(role)) fail(422, 'ROLE', 'Invalid role.');
     if (String(req.body.password || '').length < 10) fail(422, 'PASSWORD', 'Password must be at least 10 characters.');
     if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) fail(409, 'USERNAME_TAKEN', 'Username already exists.');
-    const info = db.prepare('INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(username, str(req.body.display_name, 120) || username, auth.hashPassword(String(req.body.password)), role, nowIso());
+    const phone = req.body.phone ? normalizePhone(req.body.phone) : null;
+    if (req.body.phone && !phone) fail(422, 'PHONE_INVALID', 'Enter a valid mobile number, e.g. 081-234-5678.');
+    if (phone && db.prepare('SELECT 1 FROM users WHERE phone_e164 = ?').get(phone)) fail(409, 'PHONE_TAKEN', 'This mobile number is already registered to another user.');
+    const info = db.prepare('INSERT INTO users (username, display_name, password_hash, role, phone_e164, phone_changed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(username, str(req.body.display_name, 120) || username, auth.hashPassword(String(req.body.password)), role, phone, null, nowIso());
     audit(req, 'user_created', 'user', info.lastInsertRowid, { username, role });
     res.status(201).json({ id: Number(info.lastInsertRowid) });
   }));
@@ -898,6 +662,16 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
     const active = req.body.active === undefined ? u.active : (req.body.active ? 1 : 0);
     const name = str(req.body.display_name, 120) || u.display_name;
     db.prepare('UPDATE users SET role = ?, active = ?, display_name = ? WHERE id = ?').run(role, active, name, id);
+    if (req.body.phone !== undefined) {
+      const phone = req.body.phone ? normalizePhone(req.body.phone) : null;
+      if (req.body.phone && !phone) fail(422, 'PHONE_INVALID', 'Enter a valid mobile number, e.g. 081-234-5678.');
+      if (phone !== u.phone_e164) {
+        if (phone && db.prepare('SELECT 1 FROM users WHERE phone_e164 = ? AND id <> ?').get(phone, id)) fail(409, 'PHONE_TAKEN', 'This mobile number is already registered to another user.');
+        // Only a replacement of an existing number counts as a "change" signal.
+        db.prepare('UPDATE users SET phone_e164 = ?, phone_verified_at = NULL, phone_changed_at = ? WHERE id = ?').run(phone, u.phone_e164 ? nowIso() : u.phone_changed_at, id);
+        audit(req, 'phone_changed', 'user', id, { phone: maskPhone(phone) });
+      }
+    }
     if (req.body.password) {
       if (String(req.body.password).length < 10) fail(422, 'PASSWORD', 'Password must be at least 10 characters.');
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(auth.hashPassword(String(req.body.password)), id);
@@ -934,7 +708,12 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
       try { fs.unlinkSync(path.join(dataDir, 'media', m.file)); } catch (_) { /* already gone */ }
       db.prepare('UPDATE media SET purged_at = ?, file = NULL WHERE id = ?').run(nowIso(), m.id);
     }
-    return rows.length;
+    const snaps = db.prepare('SELECT id, file FROM snapshots WHERE purged_at IS NULL AND created_at < ?').all(cutoff);
+    for (const m of snaps) {
+      try { fs.unlinkSync(path.join(dataDir, 'snapshots', m.file)); } catch (_) { /* already gone */ }
+      db.prepare('UPDATE snapshots SET purged_at = ?, file = NULL WHERE id = ?').run(nowIso(), m.id);
+    }
+    return rows.length + snaps.length;
   }
 
   app.post('/api/admin/retention/run', admin, h((req, res) => {
@@ -945,6 +724,7 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
 
   // ---------- dashboard ----------
   app.get('/api/dashboard', staff, (req, res) => {
+    ctx.sweepPending();
     const cyls = db.prepare('SELECT * FROM cylinders').all();
     const sites = new Map(db.prepare('SELECT * FROM sites').all().map((s) => [s.id, s]));
     const byStatus = {};
@@ -995,11 +775,30 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
       const st = D.effectiveVerification(db, e);
       if (st in pending) pending[st] += 1;
     }
-    const suspiciousTypes = ['implausible_travel', 'repeated_media', 'repeated_scan', 'unexpected_custody', 'out_of_geofence', 'geofence_uncertain', 'clock_skew'];
+    const suspiciousTypes = ['implausible_travel', 'repeated_media', 'repeated_scan', 'unexpected_custody', 'out_of_geofence', 'geofence_uncertain', 'clock_skew',
+      'scan_far_from_confirmed_fix', 'driver_customer_pair_concentration', 'customer_code_entered_very_fast', 'sms_code_failed_attempts', 'audit_not_found', 'audit_mismatch'];
     const suspicious = db.prepare(`SELECT f.event_id, f.flag_type, f.detail, f.created_at, e.cylinder_id, c.serial
       FROM flags f JOIN events e ON e.id = f.event_id JOIN cylinders c ON c.id = e.cylinder_id
       WHERE f.flag_type IN (${suspiciousTypes.map(() => '?').join(',')}) ORDER BY f.id DESC LIMIT 50`).all(...suspiciousTypes);
+    const dayAgo = new Date(Date.now() - 86400000).toISOString();
+    const codes24 = {
+      awaiting_sms_code: db.prepare("SELECT COUNT(*) n FROM pending_submissions WHERE status = 'awaiting'").get().n,
+      sms_unconfirmed: db.prepare("SELECT COUNT(*) n FROM pending_submissions WHERE status IN ('expired','burned','send_failed') AND closed_at >= ?").get(dayAgo).n,
+      sms_burned: db.prepare("SELECT COUNT(*) n FROM pending_submissions WHERE status = 'burned' AND closed_at >= ?").get(dayAgo).n,
+    };
+    const audits = {
+      open: db.prepare("SELECT COUNT(*) n FROM audits WHERE status = 'open'").get().n,
+      unassigned: db.prepare("SELECT COUNT(*) n FROM audits WHERE status = 'open' AND assigned_to IS NULL").get().n,
+      done_30d: db.prepare("SELECT outcome, COUNT(*) n FROM audits WHERE status = 'done' AND completed_at >= ? GROUP BY outcome")
+        .all(new Date(Date.now() - 30 * 86400000).toISOString()),
+    };
+    const weightTypes = ['weight_below_tare', 'weight_gain', 'returned_unused', 'self_weighed_return'];
+    const weightSignals = db.prepare(`SELECT f.event_id, f.flag_type, f.detail, f.created_at, c.serial FROM flags f JOIN events e ON e.id = f.event_id
+      JOIN cylinders c ON c.id = e.cylinder_id WHERE f.flag_type IN (${weightTypes.map(() => '?').join(',')}) ORDER BY f.id DESC LIMIT 30`).all(...weightTypes);
+    const statements = db.prepare(`SELECT h.id, s.name AS site_name, h.response, h.comments, h.expires_at, h.responded_at FROM holdings_statements h
+      JOIN sites s ON s.id = h.site_id WHERE h.response = 'disputed' OR (h.response IS NULL AND h.expires_at < ?) ORDER BY h.id DESC LIMIT 30`).all(nowIso());
     res.json({
+      codes: codes24, audits, weight_signals: weightSignals, risk: risk.riskSummary(db), statement_followups: statements,
       registered_count: cyls.length, by_status: byStatus, by_site: bySite, overdue_returns: overdueReturns,
       no_recent_inspection: noRecent, no_recent_days: overdueDays, pending, suspicious, markers,
       sites: [...sites.values()].filter((s) => s.lat != null).map((s) => ({ id: s.id, name: s.name, lat: s.lat, lng: s.lng, radius_m: s.radius_m, kind: s.kind })),
@@ -1054,10 +853,11 @@ function createApp({ dataDir, publicBaseUrl, tileUrl } = {}) {
   const sendIndex = (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
   app.get('/', sendIndex);
   app.get('/c/:token', sendIndex); // QR landing: read-only page, no location request
+  app.get('/s/:token', sendIndex); // customer holdings statement (public, single-use link)
   app.get('/app/*', sendIndex);
   app.use('/api', (req, res) => res.status(404).json({ error: 'NOT_FOUND', message: 'Unknown endpoint.' }));
 
-  return { app, db, runRetention };
+  return { app, db, runRetention, sms, ctx };
 }
 
 module.exports = { createApp };
