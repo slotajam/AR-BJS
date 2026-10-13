@@ -1,0 +1,66 @@
+name: research-intel CI
+
+on:
+  push:
+    paths: ["research-intel/**", ".github/workflows/research-intel-ci.yml"]
+  pull_request:
+    paths: ["research-intel/**", ".github/workflows/research-intel-ci.yml"]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: research-intel/backend
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.0-pg16
+        env:
+          POSTGRES_USER: rip
+          POSTGRES_PASSWORD: rip
+          POSTGRES_DB: rip_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rip" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      RIP_DATABASE_URL: postgresql+psycopg://rip:rip@localhost:5432/rip_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: research-intel/backend/requirements.lock
+      - run: pip install -r requirements.lock
+      - name: Lint
+        run: ruff check app tests
+      - name: Tests (JSON embeddings)
+        run: pytest -q --cov=app --cov-report=term-missing:skip-covered
+      - name: Tests (pgvector embeddings)
+        run: pytest -q
+        env:
+          RIP_PGVECTOR_ENABLED: "true"
+      - name: Migrations match models
+        run: alembic upgrade head && alembic check
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: research-intel/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: research-intel/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

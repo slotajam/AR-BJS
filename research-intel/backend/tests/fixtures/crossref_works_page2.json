@@ -1,0 +1,5 @@
+{
+  "_fixture_notice": "FIXTURE: empty final page shaped like the Crossref /works response.",
+  "status": "ok",
+  "message": {"total-results": 3, "next-cursor": "FIXTURE_CR_CURSOR_3", "items": []}
+}
