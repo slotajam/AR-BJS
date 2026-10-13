@@ -22,6 +22,7 @@ Legend: ✅ complete and tested · 🟨 implemented but credential/network-block
 | Roles owner/admin/editor/viewer, enforced on the server | ✅ | `test_viewer_is_read_only`, `test_owner_can_delete_project_and_its_files` |
 | Project isolation (404 for non-members) | ✅ | `test_project_isolation`, `test_viewer_can_export_but_not_mutate` |
 | Audit logging of mutations | ✅ | `test_last_owner_cannot_be_demoted_and_audit_logged` |
+| Failed-login throttling (Redis-backed, shared across API processes) | ✅ | `test_failed_logins_are_throttled`, `test_redis_rate_limit_backend_shared_counter` |
 | Secrets from environment only; production refuses the dev key | ✅ | `config.get_settings`; nothing hard-coded |
 | Production identity provider (OIDC) | ⏸ | A hook is documented in SECURITY.md |
 
@@ -32,7 +33,7 @@ Legend: ✅ complete and tested · 🟨 implemented but credential/network-block
 | Original query stored separately from the deterministic expansion | ✅ | same test; `test_deterministic_expansion` |
 | AI query expansion rejected (deferred) | ✅ / ⏸ | `test_ai_expansion_rejected` |
 | Async jobs with stage, progress and polling | ✅ | search and collect tests |
-| SSE progress stream | ✅ | `test_sse_progress_stream` |
+| SSE progress stream, authenticated with a 60 s single-job ticket (no access token in URLs) | ✅ | `test_sse_progress_stream`; browser smoke run |
 | Cancel | ✅ | `test_cancel_queued_job` |
 | Retry and resume from cursor checkpoint (no re-fetching) | ✅ | `test_retry_resumes_from_checkpoint_without_refetching` |
 | Durable across worker restarts (acks_late re-delivery) | ✅ | `test_redelivery_after_worker_crash_resumes_from_checkpoint` |
@@ -109,14 +110,16 @@ Legend: ✅ complete and tested · 🟨 implemented but credential/network-block
 | Alembic migration matches the models | ✅ | `alembic check` → "No new upgrade operations detected" |
 | Lockfiles | ✅ | `backend/requirements.lock` (uv), `frontend/package-lock.json` |
 | Docker Compose | ✅ (MinIO stubbed) | Images built; stack healthy; API smoke through nginx (below) |
+| One-command management (`rip.sh start/admin/verify/status/logs/stop/backup/update`) | ✅ / 🟨 | Secret generation and compose config tested. `start` against a full stack and `backup` were not run here (MinIO images unavailable) |
+| User guide (Thai) | ✅ | `docs/USER_GUIDE_TH.md` |
 | OpenAPI docs | ✅ | `/api/v1/docs`; `docs/openapi.json` |
 | CI workflow | 🟨 | `.github/workflows/research-intel-ci.yml` added. Every step passes locally, but it hasn't run on GitHub yet |
 
 ## Test results (2026-10-13)
 
 ```
-backend  pytest (PostgreSQL 16, JSON vectors)      56 passed      coverage 89%
-backend  pytest (pgvector 0.8.0, vector(384))       56 passed
+backend  pytest (PostgreSQL 16, JSON vectors)      58 passed      coverage 92%
+backend  pytest (pgvector 0.8.0, vector(384))       58 passed
 backend  ruff check app tests                       clean
 backend  alembic check                              no drift
 frontend tsc -b                                     clean
@@ -152,7 +155,7 @@ frontend vite build                                 ok (Plotly split into a lazy
 - MinIO wiring in Compose was not exercised end-to-end. The S3 backend is tested against moto.
 - Uploads are buffered in memory up to `RIP_PDF_MAX_BYTES` (50 MB default).
 - Section labels are heuristic (heading keywords). Printed page labels appear only if the PDF defines them.
-- SSE uses a token in the query string. There is no login rate limiting (see SECURITY.md).
+- The access token lives in `sessionStorage` (readable by an XSS bug; mitigated by the CSP).
 - The tag filter in the library applies after pagination (tags are a JSON column).
 - The Plotly bundle is large (~1.4 MB gzip) but lazy-loaded on the Visualize tab.
 - No per-file deletion endpoint yet (project deletion only).

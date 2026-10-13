@@ -10,6 +10,7 @@ from app.db import get_db, session_factory
 from app.deps import audit, current_user, require_role
 from app.models import Job, Search, SearchRun, User
 from app.schemas import JobOut, SearchIn, SearchOut, SearchRunOut
+from app.security import create_stream_ticket, decode_stream_ticket
 from app.services import query as query_svc
 from app.services.jobs import RETRYABLE, TERMINAL, create_job, enqueue, prepare_retry, request_cancel
 
@@ -115,10 +116,21 @@ def get_job(job_id: str, user: User = Depends(current_user), db: Session = Depen
     return _get_job(db, user, job_id, "viewer")
 
 
+@router.post("/jobs/{job_id}/events-ticket")
+def job_events_ticket(job_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Issue a 60-second ticket for opening this job's SSE stream."""
+    _get_job(db, user, job_id, "viewer")
+    return {"ticket": create_stream_ticket(user.id, job_id), "expires_in": 60}
+
+
 @router.get("/jobs/{job_id}/events")
-async def job_events(job_id: str, request: Request, user: User = Depends(current_user),
-                     db: Session = Depends(get_db)):
-    """Server-Sent Events: emits the job whenever it changes, closes when terminal."""
+async def job_events(job_id: str, request: Request, ticket: str, db: Session = Depends(get_db)):
+    """Server-Sent Events: emits the job whenever it changes, closes when terminal.
+    Authenticated with a ticket from POST /jobs/{job_id}/events-ticket."""
+    user_id = decode_stream_ticket(ticket, job_id)
+    user = db.get(User, user_id) if user_id else None
+    if user is None or not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired stream ticket")
     _get_job(db, user, job_id, "viewer")
 
     async def stream():

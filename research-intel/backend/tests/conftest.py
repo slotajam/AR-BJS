@@ -15,6 +15,7 @@ os.environ["RIP_STORAGE_BACKEND"] = "local"
 os.environ["RIP_STORAGE_LOCAL_ROOT"] = tempfile.mkdtemp(prefix="rip-test-storage-")
 os.environ["RIP_SECRET_KEY"] = "test-secret-key-not-for-production-use-0123456789"
 os.environ["RIP_CONTACT_EMAIL"] = "tests@example.org"
+os.environ["RIP_RATE_LIMIT_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 import pymupdf  # noqa: E402
@@ -52,6 +53,9 @@ def _schema():
 
 @pytest.fixture(autouse=True)
 def _clean_db(_schema):
+    from app.services import ratelimit
+
+    ratelimit.reset()
     yield
     eng = create_engine(os.environ["RIP_DATABASE_URL"])
     with eng.begin() as c:

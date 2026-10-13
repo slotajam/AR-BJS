@@ -137,9 +137,20 @@ def test_sse_progress_stream(client, owner, project, providers):
     s = _search(client, owner, project["id"])
     jid = s["jobs"][0]["id"]
     token = owner["Authorization"].split()[1]
-    with client.stream("GET", f"/api/v1/jobs/{jid}/events?access_token={token}") as r:
+    # the long-lived access token is no longer accepted in the URL
+    assert client.get(f"/api/v1/jobs/{jid}/events?ticket={token}").status_code == 401
+    ticket = client.post(f"/api/v1/jobs/{jid}/events-ticket", headers=owner).json()["ticket"]
+    with client.stream("GET", f"/api/v1/jobs/{jid}/events?ticket={ticket}") as r:
         body = "".join(r.iter_text())
     assert "event: job" in body and "event: end" in body and '"status": "succeeded"' in body
+    # a ticket is bound to one job
+    other = _search(client, owner, project["id"], run_now=True, idempotency_key="other")["jobs"][0]["id"]
+    assert client.get(f"/api/v1/jobs/{other}/events?ticket={ticket}").status_code == 401
+    # outsiders cannot obtain a ticket
+    from tests.conftest import register
+
+    outsider = register(client, "x@example.org")
+    assert client.post(f"/api/v1/jobs/{jid}/events-ticket", headers=outsider).status_code == 404
 
 
 def test_disabled_connector_is_skipped(client, owner, project, providers, monkeypatch):

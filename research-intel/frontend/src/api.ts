@@ -203,10 +203,11 @@ export interface Analytics {
   notes: string[];
 }
 
-/** Subscribe to job progress via SSE; falls back to polling if EventSource fails. */
+/** Subscribe to job progress via SSE (authenticated with a 60 s single-job ticket, never the
+ *  access token); falls back to polling if EventSource or the ticket fails. */
 export function watchJob(jobId: string, onUpdate: (j: Job) => void): () => void {
-  const token = getToken();
   let closed = false;
+  let es: EventSource | null = null;
   let timer: number | undefined;
   const poll = async () => {
     if (closed) return;
@@ -219,13 +220,17 @@ export function watchJob(jobId: string, onUpdate: (j: Job) => void): () => void 
     }
     timer = window.setTimeout(poll, 2000);
   };
-  if (typeof EventSource === "undefined" || !token) {
+  if (typeof EventSource === "undefined") {
     poll();
-    return () => { closed = true; window.clearTimeout(timer); };
+  } else {
+    api.post<{ ticket: string }>(`/jobs/${jobId}/events-ticket`).then(({ ticket }) => {
+      if (closed) return;
+      const src = new EventSource(`${BASE}/jobs/${jobId}/events?ticket=${encodeURIComponent(ticket)}`);
+      es = src;
+      src.addEventListener("job", (e) => onUpdate(JSON.parse((e as MessageEvent).data)));
+      src.addEventListener("end", () => src.close());
+      src.onerror = () => { src.close(); if (!closed) poll(); };
+    }).catch(() => poll());
   }
-  const es = new EventSource(`${BASE}/jobs/${jobId}/events?access_token=${encodeURIComponent(token)}`);
-  es.addEventListener("job", (e) => onUpdate(JSON.parse((e as MessageEvent).data)));
-  es.addEventListener("end", () => es.close());
-  es.onerror = () => { es.close(); if (!closed) poll(); };
-  return () => { closed = true; es.close(); window.clearTimeout(timer); };
+  return () => { closed = true; es?.close(); window.clearTimeout(timer); };
 }

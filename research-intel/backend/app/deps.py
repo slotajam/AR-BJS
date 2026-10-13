@@ -15,14 +15,10 @@ ROLE_RANK = {"viewer": 0, "editor": 1, "admin": 2, "owner": 3}
 
 
 def current_user(
-    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: Session = Depends(get_db),
 ) -> User:
     token = creds.credentials if creds else None
-    # EventSource cannot set headers; SSE endpoints accept ?access_token=.
-    if token is None and request.url.path.endswith("/events"):
-        token = request.query_params.get("access_token")
     user_id = decode_token(token) if token else None
     user = db.get(User, user_id) if user_id else None
     if user is None or not user.is_active:

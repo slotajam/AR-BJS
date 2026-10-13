@@ -91,3 +91,48 @@ def test_owner_can_delete_project_and_its_files(client, owner, project):
     assert client.get(f"/api/v1/projects/{pid}", headers=owner).status_code == 404
     with session_factory()() as db:
         assert db.scalar(select(AuditLog).where(AuditLog.action == "project.delete")) is not None
+
+
+def test_failed_logins_are_throttled(client, monkeypatch):
+    from app.config import get_settings
+    from app.services import ratelimit
+
+    monkeypatch.setattr(get_settings(), "rate_limit_backend", "memory")
+    monkeypatch.setattr(get_settings(), "login_max_failures", 3)
+    ratelimit.reset()
+    register(client, "t@example.org")
+    for _ in range(3):
+        r = client.post("/api/v1/auth/login", json={"email": "t@example.org", "password": "wrong-password!!"})
+        assert r.status_code == 401
+    r = client.post("/api/v1/auth/login", json={"email": "t@example.org", "password": "correct-horse-battery"})
+    assert r.status_code == 429 and "Retry-After" in r.headers  # even the right password is held back
+    with session_factory()() as db:
+        assert db.scalar(select(AuditLog).where(AuditLog.action == "user.login_throttled")) is not None
+    ratelimit.reset()
+    assert client.post("/api/v1/auth/login", json={"email": "t@example.org",
+                                                   "password": "correct-horse-battery"}).status_code == 200
+
+
+def test_redis_rate_limit_backend_shared_counter(monkeypatch):
+    import pytest
+    import redis as redis_lib
+
+    from app.config import get_settings
+    from app.services import ratelimit
+
+    try:
+        redis_lib.Redis.from_url(get_settings().redis_url, socket_connect_timeout=1).ping()
+    except redis_lib.RedisError:
+        pytest.skip("Redis not available")
+    monkeypatch.setattr(get_settings(), "rate_limit_backend", "redis")
+    monkeypatch.setattr(get_settings(), "login_max_failures", 2)
+    ratelimit.reset()
+    email = "redis-rl@example.org"
+    ratelimit.record_success(email)
+    assert isinstance(ratelimit._store(), ratelimit._Redis)
+    ratelimit.record_failure(email, None)
+    ratelimit.reset()  # a different API process sees the same counter
+    ratelimit.record_failure(email, None)
+    assert ratelimit.login_blocked(email, None)
+    ratelimit.record_success(email)
+    assert not ratelimit.login_blocked(email, None)

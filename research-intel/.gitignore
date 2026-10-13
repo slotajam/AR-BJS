@@ -10,3 +10,4 @@ node_modules/
 dist/
 connector-verification.json
 *.tsbuildinfo
+backups/

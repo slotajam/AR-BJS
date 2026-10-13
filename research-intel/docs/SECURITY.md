@@ -4,6 +4,12 @@
 
 - Accounts use email and password. Passwords are hashed with Argon2id (`argon2-cffi`) and must be at
   least 10 characters. Failed logins are written to the audit log.
+- Failed sign-ins are throttled in Redis (shared by all API processes): after
+  `RIP_LOGIN_MAX_FAILURES` (10) failures for an email, or 5× that from one IP, within
+  `RIP_LOGIN_WINDOW_SECONDS` (15 min), login returns 429 with `Retry-After`, even when the password is
+  correct. A successful login clears the email's counter. Throttled attempts are audited as
+  `user.login_throttled`. Behind nginx, the client IP comes from `X-Forwarded-For` (the API container
+  is not published directly).
 - Access tokens are HS256 JWTs signed with `RIP_SECRET_KEY` and expire after
   `RIP_ACCESS_TOKEN_MINUTES` (60). The app refuses to start in production with the development key.
 - To use an institutional IdP, replace `security.decode_token` with OIDC token verification. The rest
@@ -64,12 +70,12 @@ API keys are removed from stored request parameters. `.env` is git-ignored.
   `X-Frame-Options: SAMEORIGIN`. nginx adds a CSP.
 - CORS is restricted to `RIP_CORS_ORIGINS`.
 - Terminate TLS in front of `web` in production.
+- Live job progress (SSE) is authenticated with a **stream ticket**: `POST /jobs/{id}/events-ticket`
+  returns a token valid for 60 s and for that one job only. The long-lived access token never appears
+  in a URL.
 
-## Known limitations
+## Remaining limitations
 
-- The SSE endpoint accepts `?access_token=`, because EventSource can't send headers. Tokens are
-  short-lived, but URLs may end up in proxy logs. Prefer the polling fallback, or a cookie session,
-  if that matters for your deployment.
-- There is no login rate limiting in Phase 1. Put the API behind a reverse proxy rate limit, or an
-  IdP that provides one.
+- The access token is kept in `sessionStorage`, so an XSS bug could read it. nginx's CSP limits
+  script sources to the app's own origin.
 - CSP allows `'unsafe-eval'`, which Plotly's WebGL traces need.

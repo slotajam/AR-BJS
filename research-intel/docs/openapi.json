@@ -820,15 +820,15 @@
         }
       }
     },
-    "/api/v1/jobs/{job_id}/events": {
-      "get": {
+    "/api/v1/jobs/{job_id}/events-ticket": {
+      "post": {
         "tags": [
           "searches",
           "jobs"
         ],
-        "summary": "Job Events",
-        "description": "Server-Sent Events: emits the job whenever it changes, closes when terminal.",
-        "operationId": "job_events_api_v1_jobs__job_id__events_get",
+        "summary": "Job Events Ticket",
+        "description": "Issue a 60-second ticket for opening this job's SSE stream.",
+        "operationId": "job_events_ticket_api_v1_jobs__job_id__events_ticket_post",
         "security": [
           {
             "HTTPBearer": []
@@ -842,6 +842,57 @@
             "schema": {
               "type": "string",
               "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/events": {
+      "get": {
+        "tags": [
+          "searches",
+          "jobs"
+        ],
+        "summary": "Job Events",
+        "description": "Server-Sent Events: emits the job whenever it changes, closes when terminal.\nAuthenticated with a ticket from POST /jobs/{job_id}/events-ticket.",
+        "operationId": "job_events_api_v1_jobs__job_id__events_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "ticket",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ticket"
             }
           }
         ],

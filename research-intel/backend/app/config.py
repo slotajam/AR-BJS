@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     secret_key: str = "dev-only-change-me"
     access_token_minutes: int = 60
     allow_registration: bool = True
+    # Failed-login throttling (per email; per IP gets 5x the budget)
+    rate_limit_backend: str = "redis"  # redis | memory
+    login_max_failures: int = 10
+    login_window_seconds: int = 900
 
     # Celery: eager mode runs tasks inline (tests / single-process dev only).
     celery_eager: bool = False

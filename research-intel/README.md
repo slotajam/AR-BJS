@@ -22,16 +22,23 @@ research-intel/
   docker-compose.yml, .env.example
 ```
 
-## Quick start (Docker)
+## Quick start (one command)
+
+Requires Docker with Compose v2.
 
 ```bash
 cd research-intel
-cp .env.example .env              # set RIP_SECRET_KEY, POSTGRES_PASSWORD, MINIO_*, RIP_CONTACT_EMAIL
-docker compose up -d --build
-open http://localhost:8080        # create an account, then a project
-# optional labelled sample project (offline, fixture data):
-docker compose exec api python -m app.cli seed-demo you@example.org
+./rip.sh start     # first run writes .env with random secrets, builds, starts and waits until healthy
+# → http://localhost:8080  (create an account in the browser, or: ./rip.sh admin)
+./rip.sh verify    # live OpenAlex / Crossref check from your network (do this once)
 ```
+
+Other commands: `./rip.sh status | logs | stop | backup | update`.
+A user guide in Thai is at [docs/USER_GUIDE_TH.md](docs/USER_GUIDE_TH.md).
+Optional labelled sample project (offline fixture data):
+`docker compose exec api python -m app.cli seed-demo you@example.org`.
+
+Manual setup: `cp .env.example .env`, fill in the secrets, then `docker compose up -d --build`.
 
 Services: `db` (PostgreSQL 16 + pgvector), `redis` (AOF-durable broker), `minio` (private bucket),
 `migrate` (runs `alembic upgrade head` once), `api`, `worker` (Celery), `web` (nginx + SPA, proxies `/api`).
@@ -88,6 +95,7 @@ npm run typecheck && npm test && npm run build
 
 | Document | Contents |
 |---|---|
+| [USER_GUIDE_TH.md](docs/USER_GUIDE_TH.md) | User guide (Thai) |
 | [STATUS.md](docs/STATUS.md) | Verified status per requirement, test results, smoke test report, known limitations, deferrals |
 | [CONNECTORS.md](docs/CONNECTORS.md) | Connector capability matrix, verification state, how to verify live |
 | [DATA_DICTIONARY.md](docs/DATA_DICTIONARY.md) | Tables, fields, states, missing-data reasons |
