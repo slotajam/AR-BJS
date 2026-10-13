@@ -1,0 +1,48 @@
+{
+  "_fixture_notice": "FIXTURE: synthetic records shaped like the Crossref /works response. Not real publications. DOIs use the 10.5555 test prefix.",
+  "status": "ok",
+  "message-type": "work-list",
+  "message": {
+    "total-results": 3,
+    "items-per-page": 3,
+    "next-cursor": "FIXTURE_CR_CURSOR_2",
+    "items": [
+      {
+        "DOI": "10.5555/fx.0001",
+        "title": ["[FIXTURE] Liquid cooling plate design for lithium-ion battery thermal management"],
+        "abstract": "<jats:p>Liquid cooling plates reduce peak battery temperature during fast charging.</jats:p>",
+        "author": [{"given": "Ada", "family": "Fixture", "ORCID": "http://orcid.org/0000-0002-1825-0097", "affiliation": [{"name": "Fixture University"}]},
+                   {"given": "Ben", "family": "Example", "affiliation": []}],
+        "container-title": ["Fixture J. Energy Storage"],
+        "issued": {"date-parts": [[2023, 4, 12]]},
+        "published": {"date-parts": [[2023, 4, 12]]},
+        "type": "journal-article",
+        "language": "en",
+        "license": [{"URL": "http://creativecommons.org/licenses/by/4.0/", "content-version": "vor", "start": {"date-parts": [[2023, 4, 12]]}}],
+        "link": [{"URL": "https://publisher.example.com/fx0001/fulltext.pdf", "content-type": "application/pdf", "content-version": "vor", "intended-application": "text-mining"}],
+        "is-referenced-by-count": 15,
+        "resource": {"primary": {"URL": "https://publisher.example.com/fx0001"}}
+      },
+      {
+        "DOI": "10.5555/fx.0004",
+        "title": ["[FIXTURE] Immersion cooling of battery modules with dielectric fluids"],
+        "author": [{"given": "Dara", "family": "Placeholder", "affiliation": [{"name": "Placeholder Polytechnic"}]}],
+        "container-title": ["Fixture Journal of Power Systems"],
+        "issued": {"date-parts": [[2023, 1]]},
+        "type": "journal-article",
+        "license": [{"URL": "https://publisher.example.com/tdm-license", "content-version": "tdm"}],
+        "link": [{"URL": "https://publisher.example.com/fx0004.pdf", "content-type": "application/pdf", "content-version": "vor", "intended-application": "text-mining"}],
+        "is-referenced-by-count": 3
+      },
+      {
+        "DOI": "10.5555/fx.0007",
+        "title": ["[FIXTURE] Erratum: Cooling strategies for battery packs"],
+        "author": [],
+        "container-title": ["Fixture Applied Thermal Letters"],
+        "issued": {"date-parts": [[2024]]},
+        "type": "journal-article",
+        "is-referenced-by-count": 0
+      }
+    ]
+  }
+}

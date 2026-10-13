@@ -1,0 +1,18 @@
+# HTTPS front end for the Research Intelligence Platform.
+# Caddy obtains and renews a Let's Encrypt certificate for RIP_DOMAIN automatically
+# and redirects plain HTTP to HTTPS. Used by docker-compose.domain.yml.
+{
+	email {$RIP_ACME_EMAIL}
+}
+
+{$RIP_DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy web:80 {
+		# send live job progress (server-sent events) to the browser immediately
+		flush_interval -1
+	}
+}
