@@ -131,6 +131,10 @@ def test_collect_permitted_pdf_end_to_end(client, owner, project, providers, web
 
     pdf = client.get(f"/api/v1/projects/{pid}/papers/{paper_id}/pdf", headers=owner)
     assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    img = client.get(f"/api/v1/projects/{pid}/papers/{paper_id}/pages/1", headers=owner)
+    assert img.status_code == 200 and img.content.startswith(b"\x89PNG")
+    assert float(img.headers["X-Page-Width"]) > 0
+    assert client.get(f"/api/v1/projects/{pid}/papers/{paper_id}/pages/9", headers=owner).status_code == 404
 
     # re-collecting does not download or store a second copy
     web.requests.clear()
@@ -206,3 +210,35 @@ def test_upload_requires_attestation_and_dedups_by_checksum(client, owner, proje
                     data={"access_basis": "user_upload_own_work", "rights_attested": "true"})
     assert r.json()["duplicate"] is True and r.json()["paper_id"] == first["paper_id"]
     assert r.json()["dedup_basis"] == "file_checksum"
+
+
+def test_scanned_pdf_without_text_needs_review(client, owner, project):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(72, 72, 300, 300), color=(0, 0, 0), fill=(0.5, 0.5, 0.5))  # image-like, no text
+    data = doc.tobytes()
+    doc.close()
+    r = client.post(f"/api/v1/projects/{project['id']}/uploads", headers=owner,
+                    files={"file": ("scan.pdf", data, "application/pdf")},
+                    data={"access_basis": "user_upload_own_work", "rights_attested": "true"})
+    assert r.status_code == 201
+    d = client.get(f"/api/v1/projects/{project['id']}/papers/{r.json()['paper_id']}", headers=owner).json()
+    assert d["processing_status"] == "needs_review" and d["chunk_count"] == 0
+    assert d["file"]["validation"]["extraction"]["pages_without_text"] == [0]
+
+
+def test_user_corrections_stored_separately(client, owner, project):
+    r = client.post(f"/api/v1/projects/{project['id']}/uploads", headers=owner,
+                    files={"file": ("a.pdf", make_pdf(SAMPLE_PAGES), "application/pdf")},
+                    data={"access_basis": "user_upload_own_work", "rights_attested": "true", "title": "Orig"})
+    pid = r.json()["paper_id"]
+    base = f"/api/v1/projects/{project['id']}/papers/{pid}"
+    assert client.patch(base, headers=owner, json={"corrections": {"title": "Fixed"},
+                                                   "correction_reason": "typo"}).status_code == 200
+    assert client.patch(base, headers=owner, json={"corrections": {"citations": 5}}).status_code == 422
+    d = client.get(base, headers=owner).json()
+    assert d["title"] == "Orig"  # provider/upload value untouched
+    assert d["effective_values"] == {"title": "Fixed"}
+    assert d["corrections"][0]["old_value"] == "Orig" and d["corrections"][0]["reason"] == "typo"

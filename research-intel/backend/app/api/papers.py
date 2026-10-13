@@ -333,6 +333,33 @@ def get_pdf(project_id: str, paper_id: str, user: User = Depends(current_user), 
                              "X-Content-Type-Options": "nosniff"})
 
 
+@router.get("/papers/{paper_id}/pages/{page_index}")
+def render_page(project_id: str, paper_id: str, page_index: int, zoom: float = Query(1.5, ge=0.5, le=3.0),
+                user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Render one PDF page to PNG so the viewer works without a browser PDF plugin and can overlay
+    chunk bounding boxes. X-Page-Width/Height give the page size in PDF points."""
+    import pymupdf
+
+    require_role(db, user, project_id, "viewer")
+    p = _paper(db, project_id, paper_id)
+    f = acquisition.existing_file(db, p)
+    if f is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No collected PDF")
+    doc = pymupdf.open(stream=get_storage().get(f.storage_key), filetype="pdf")
+    try:
+        if not 0 <= page_index < doc.page_count:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Page out of range")
+        page = doc.load_page(page_index)
+        png = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).tobytes("png")
+        w, h = page.rect.width, page.rect.height
+    finally:
+        doc.close()
+    return Response(png, media_type="image/png",
+                    headers={"Cache-Control": "private, max-age=300", "X-Page-Width": f"{w:.2f}",
+                             "X-Page-Height": f"{h:.2f}",
+                             "Access-Control-Expose-Headers": "X-Page-Width, X-Page-Height"})
+
+
 @router.post("/papers/{paper_id}/collect", response_model=JobOut, status_code=202)
 def collect_paper(project_id: str, paper_id: str, request: Request, body: CollectIn | None = None,
                   user: User = Depends(current_user), db: Session = Depends(get_db)):

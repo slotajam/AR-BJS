@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import audit, current_user, require_role
-from app.models import AuditLog, Membership, Project, User
+from app.models import AuditLog, Export, File, Membership, Project, User
 from app.schemas import MemberIn, MemberOut, ProjectIn, ProjectOut
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -56,6 +56,25 @@ def update_project(project_id: str, body: ProjectIn, request: Request, user: Use
           details={"before": before, "after": body.model_dump()}, request=request)
     db.commit()
     return _out(p, m.role)
+
+
+@router.delete("/{project_id}", status_code=204)
+def delete_project(project_id: str, request: Request, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)):
+    """Owner-only hard delete: removes stored PDFs and exports, then all project rows (cascade).
+    The audit entry is kept (audit_logs has no FK to projects)."""
+    from app.services.storage import get_storage
+
+    require_role(db, user, project_id, "owner")
+    store = get_storage()
+    keys = [f.storage_key for f in db.scalars(select(File).where(File.project_id == project_id))]
+    keys += [e.storage_key for e in db.scalars(select(Export).where(Export.project_id == project_id)) if e.storage_key]
+    for k in keys:
+        store.delete(k)
+    audit(db, user_id=user.id, project_id=project_id, action="project.delete", entity_type="project",
+          entity_id=project_id, details={"deleted_objects": len(keys)}, request=request)
+    db.delete(db.get(Project, project_id))
+    db.commit()
 
 
 @router.get("/{project_id}/members", response_model=list[MemberOut])

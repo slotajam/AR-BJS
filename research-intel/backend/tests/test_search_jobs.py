@@ -156,3 +156,30 @@ def test_ai_expansion_rejected(client, owner, project):
     r = client.post(f"/api/v1/projects/{project['id']}/searches", headers=owner,
                     json={**SEARCH, "ai_expansion_enabled": True})
     assert r.status_code == 422
+
+
+def test_redelivery_after_worker_crash_resumes_from_checkpoint(client, owner, project, providers):
+    """Simulate a worker dying after page 1: job/run left 'running' with a cursor checkpoint.
+    Celery re-delivers (acks_late); the runner resumes from the cursor without duplicating records."""
+    from app.models import Job, SearchRun
+    from app.worker.tasks import execute_job
+
+    providers.openalex_mode = "fail_page2"
+    s = _search(client, owner, project["id"], sources=["openalex"])
+    jid = s["jobs"][0]["id"]
+    with session_factory()() as db:
+        job = db.get(Job, jid)
+        job.status, job.stage = "running", "search:openalex"  # crashed mid-run
+        run = db.scalar(select(SearchRun).where(SearchRun.job_id == jid))
+        run.status = "running"
+        db.commit()
+    providers.openalex_mode = "ok"
+    providers.calls.clear()
+    execute_job(jid)  # what a redelivered task does
+    assert [c.url.params.get("cursor") for c in providers.calls] == ["FIXTURE_CURSOR_2"]
+    j = client.get(f"/api/v1/jobs/{jid}", headers=owner).json()
+    assert j["status"] == "succeeded" and j["attempts"] == 2
+    with session_factory()() as db:
+        assert db.scalar(select(func.count()).select_from(Paper)) == 5
+    execute_job(jid)  # duplicate delivery of a finished job is a no-op
+    assert client.get(f"/api/v1/jobs/{jid}", headers=owner).json()["attempts"] == 2

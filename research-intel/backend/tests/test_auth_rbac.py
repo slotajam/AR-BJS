@@ -70,3 +70,24 @@ def test_security_headers(client):
     r = client.get("/api/v1/health")
     assert r.status_code == 200
     assert r.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_owner_can_delete_project_and_its_files(client, owner, project):
+    from app.models import File
+    from app.services.storage import get_storage
+
+    pid = project["id"]
+    r = client.post(f"/api/v1/projects/{pid}/uploads", headers=owner,
+                    files={"file": ("a.pdf", make_pdf(["Delete me"]), "application/pdf")},
+                    data={"access_basis": "user_upload_own_work", "rights_attested": "true"})
+    with session_factory()() as db:
+        key = db.get(File, r.json()["file_id"]).storage_key
+    assert get_storage().exists(key)
+    editor = register(client, "ed@example.org")
+    client.put(f"/api/v1/projects/{pid}/members", headers=owner, json={"email": "ed@example.org", "role": "admin"})
+    assert client.delete(f"/api/v1/projects/{pid}", headers=editor).status_code == 403
+    assert client.delete(f"/api/v1/projects/{pid}", headers=owner).status_code == 204
+    assert not get_storage().exists(key)
+    assert client.get(f"/api/v1/projects/{pid}", headers=owner).status_code == 404
+    with session_factory()() as db:
+        assert db.scalar(select(AuditLog).where(AuditLog.action == "project.delete")) is not None
