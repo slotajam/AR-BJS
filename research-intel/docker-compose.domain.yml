@@ -1,0 +1,29 @@
+# Public HTTPS on your own domain (Caddy + automatic Let's Encrypt certificates).
+#
+# Enabled by:  ./rip.sh start --domain research.example.org --email you@example.org
+# which records RIP_DOMAIN / RIP_ACME_EMAIL and adds this file to COMPOSE_FILE in .env,
+# so every later `docker compose` / `./rip.sh` command includes it.
+#
+# Requirements: a DNS A/AAAA record for the domain pointing at this server, and
+# ports 80 and 443 reachable from the internet (Let's Encrypt validates over port 80).
+services:
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      RIP_DOMAIN: ${RIP_DOMAIN:?set RIP_DOMAIN}
+      RIP_ACME_EMAIL: ${RIP_ACME_EMAIL:?set RIP_ACME_EMAIL}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates and keys: keep this volume
+      - caddy_config:/config
+    depends_on:
+      web: { condition: service_started }
+
+volumes:
+  caddy_data:
+  caddy_config:

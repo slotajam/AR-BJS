@@ -8,8 +8,9 @@
   `RIP_LOGIN_MAX_FAILURES` (10) failures for an email, or 5× that from one IP, within
   `RIP_LOGIN_WINDOW_SECONDS` (15 min), login returns 429 with `Retry-After`, even when the password is
   correct. A successful login clears the email's counter. Throttled attempts are audited as
-  `user.login_throttled`. Behind nginx, the client IP comes from `X-Forwarded-For` (the API container
-  is not published directly).
+  `user.login_throttled`. nginx accepts `X-Forwarded-For` only from the Docker network and
+  127.0.0.1 (the Caddy front end or a host proxy) and passes the resulting client address on, so the
+  per-IP limit can't be dodged by sending a fake header. The API container is never published.
 - Access tokens are HS256 JWTs signed with `RIP_SECRET_KEY` and expire after
   `RIP_ACCESS_TOKEN_MINUTES` (60). The app refuses to start in production with the development key.
 - To use an institutional IdP, replace `security.decode_token` with OIDC token verification. The rest
@@ -69,7 +70,9 @@ API keys are removed from stored request parameters. `.env` is git-ignored.
 - The API sends `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and
   `X-Frame-Options: SAMEORIGIN`. nginx adds a CSP.
 - CORS is restricted to `RIP_CORS_ORIGINS`.
-- Terminate TLS in front of `web` in production.
+- TLS: `./rip.sh start --domain …` adds a Caddy front end with automatic Let's Encrypt
+  certificates, HTTP→HTTPS redirect and HSTS. Without it, the app listens on `127.0.0.1:8080` only;
+  put your own TLS proxy in front.
 - Live job progress (SSE) is authenticated with a **stream ticket**: `POST /jobs/{id}/events-ticket`
   returns a token valid for 60 s and for that one job only. The long-lived access token never appears
   in a URL.

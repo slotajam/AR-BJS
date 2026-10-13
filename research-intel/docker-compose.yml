@@ -29,6 +29,7 @@ x-backend-env: &backend-env
 
 services:
   db:
+    restart: unless-stopped
     image: pgvector/pgvector:0.8.0-pg16
     environment:
       POSTGRES_USER: rip
@@ -41,6 +42,7 @@ services:
       retries: 20
 
   redis:
+    restart: unless-stopped
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]   # durable broker queue across restarts
     volumes: [redisdata:/data]
@@ -50,6 +52,7 @@ services:
       retries: 20
 
   minio:
+    restart: unless-stopped
     image: minio/minio:RELEASE.2024-11-07T00-52-20Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -81,6 +84,7 @@ services:
       db: { condition: service_healthy }
 
   api:
+    restart: unless-stopped
     build: ./backend
     environment: *backend-env
     depends_on:
@@ -93,6 +97,7 @@ services:
       retries: 10
 
   worker:
+    restart: unless-stopped
     build: ./backend
     environment: *backend-env
     command: ["celery", "-A", "app.worker.celery_app", "worker", "-Q", "rip", "-l", "info", "--concurrency", "2"]
@@ -102,8 +107,11 @@ services:
       minio-init: { condition: service_completed_successfully }
 
   web:
+    restart: unless-stopped
     build: ./frontend
-    ports: ["8080:80"]
+    # Local-only by default: reach it through the HTTPS front end (docker-compose.domain.yml)
+    # or your own reverse proxy. Set RIP_BIND=0.0.0.0 only on a trusted private network.
+    ports: ["${RIP_BIND:-127.0.0.1}:${RIP_PORT:-8080}:80"]
     depends_on:
       api: { condition: service_healthy }
 

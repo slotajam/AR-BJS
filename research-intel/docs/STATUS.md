@@ -110,7 +110,8 @@ Legend: ✅ complete and tested · 🟨 implemented but credential/network-block
 | Alembic migration matches the models | ✅ | `alembic check` → "No new upgrade operations detected" |
 | Lockfiles | ✅ | `backend/requirements.lock` (uv), `frontend/package-lock.json` |
 | Docker Compose | ✅ (MinIO stubbed) | Images built; stack healthy; API smoke through nginx (below) |
-| One-command management (`rip.sh start/admin/verify/status/logs/stop/backup/update`) | ✅ / 🟨 | Secret generation and compose config tested. `start` against a full stack and `backup` were not run here (MinIO images unavailable) |
+| One-command management (`rip.sh start/admin/verify/status/logs/stop/backup/update`) | ✅ / 🟨 | `start`, `start --domain`, `status` and `stop` run end to end against the Docker stack (MinIO stubbed). `backup` not run here (MinIO images unavailable) |
+| Public website: `./rip.sh start --domain` (Caddy, automatic Let's Encrypt, HTTP→HTTPS redirect, HSTS; app bound to 127.0.0.1) | ✅ / 🟨 | Tested with domain `localhost` (Caddy internal CA): 308 redirect, HTTPS login, upload → processing, page render, SSE streamed through Caddy, closed registration, spoofed `X-Forwarded-For` ignored. Real Let's Encrypt issuance needs a public domain and could not be tested here |
 | User guide (Thai) | ✅ | `docs/USER_GUIDE_TH.md` |
 | OpenAPI docs | ✅ | `/api/v1/docs`; `docs/openapi.json` |
 | CI workflow | 🟨 | `.github/workflows/research-intel-ci.yml` added. Every step passes locally, but it hasn't run on GitHub yet |

@@ -33,6 +33,19 @@ cd research-intel
 ./rip.sh verify    # live OpenAlex / Crossref check from your network (do this once)
 ```
 
+### Publish it as a website (HTTPS on your own domain)
+
+On a Linux server with Docker, after pointing a DNS A record for your domain at the server:
+
+```bash
+./rip.sh start --domain research.example.org --email you@example.org
+./rip.sh admin     # self-registration is switched off for public sites; create accounts here
+```
+
+This adds a [Caddy](https://caddyserver.com) front end (`docker-compose.domain.yml`) that gets and
+renews a Let's Encrypt certificate and redirects HTTP to HTTPS. The app itself listens only on
+`127.0.0.1:8080`. Ports 80 and 443 must be open. Full guide: [docs/OPERATIONS.md](docs/OPERATIONS.md#deployment).
+
 Other commands: `./rip.sh status | logs | stop | backup | update`.
 A user guide in Thai is at [docs/USER_GUIDE_TH.md](docs/USER_GUIDE_TH.md).
 Optional labelled sample project (offline fixture data):
@@ -41,7 +54,8 @@ Optional labelled sample project (offline fixture data):
 Manual setup: `cp .env.example .env`, fill in the secrets, then `docker compose up -d --build`.
 
 Services: `db` (PostgreSQL 16 + pgvector), `redis` (AOF-durable broker), `minio` (private bucket),
-`migrate` (runs `alembic upgrade head` once), `api`, `worker` (Celery), `web` (nginx + SPA, proxies `/api`).
+`migrate` (runs `alembic upgrade head` once), `api`, `worker` (Celery), `web` (nginx + SPA, proxies `/api`),
+and `caddy` (HTTPS, only with `--domain`).
 
 If you build behind a TLS-intercepting proxy, pass its CA as a build secret:
 `docker build --secret id=build_ca,src=/path/ca.pem ...`

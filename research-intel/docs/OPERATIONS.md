@@ -2,15 +2,64 @@
 
 ## Deployment
 
+### Public website on your own domain (recommended)
+
+1. **Server:** Ubuntu 22.04/24.04 with at least 2 vCPU, 4 GB RAM and 40 GB disk (more for many PDFs).
+   Install Docker: `curl -fsSL https://get.docker.com | sh`.
+2. **DNS:** at your domain registrar, create an **A record** (and AAAA for IPv6, if the server has one)
+   for e.g. `research.example.org` pointing to the server's public IP.
+3. **Firewall:** open ports 22, 80 and 443 in your cloud provider's firewall and on the host
+   (`ufw allow 22,80,443/tcp && ufw enable`). Port 80 is needed for Let's Encrypt validation and
+   the HTTP→HTTPS redirect.
+4. **Start:**
+   ```bash
+   git clone https://github.com/slotajam/AR-BJS.git && cd AR-BJS/research-intel
+   ./rip.sh start --domain research.example.org --email you@example.org
+   ./rip.sh admin      # create the first account
+   ./rip.sh verify     # live OpenAlex / Crossref check
+   ```
+   `--domain` writes `RIP_DOMAIN`, `RIP_ACME_EMAIL`, `RIP_CORS_ORIGINS=["https://…"]`,
+   `RIP_ALLOW_REGISTRATION=false` and `COMPOSE_FILE=docker-compose.yml:docker-compose.domain.yml`
+   to `.env`, so every later `./rip.sh` or `docker compose` command includes the Caddy front end.
+   Add `--open-registration` to let anyone create an account.
+5. **Backups:** schedule `./rip.sh backup` daily (cron) and copy `backups/` off the server.
+
+How it fits together:
+
+```
+internet ─▶ caddy :80/:443 (TLS, Let's Encrypt, HTTP→HTTPS) ─▶ web (nginx: SPA + /api proxy) ─▶ api ─▶ db / redis / minio
+                                                    127.0.0.1:8080 ─┘ (local access / your own proxy)
+```
+
+- Certificates live in the `caddy_data` volume and renew automatically. Keep that volume.
+- Caddy streams live job progress unbuffered (`flush_interval -1`) and sends HSTS.
+- nginx trusts `X-Forwarded-For` only from the Docker network and 127.0.0.1, so the per-IP login
+  throttle sees real client addresses and clients cannot spoof theirs.
+- To change the domain, run `./rip.sh start --domain new.example.org` again.
+- To go back to local-only, delete the `COMPOSE_FILE` and `RIP_DOMAIN` lines from `.env`, then
+  `docker compose down caddy` (or `./rip.sh stop`) and `./rip.sh start`.
+
+Troubleshooting: `./rip.sh logs caddy` shows certificate progress. The usual causes of failure are
+DNS not yet pointing at the server, or port 80 blocked by a cloud firewall. Let's Encrypt rate-limits
+repeated failures, so fix DNS and ports before retrying many times.
+
+### Behind an existing reverse proxy / on a private network
+
+`./rip.sh start` without `--domain` serves the app on `127.0.0.1:8080` only. Point your own proxy
+(nginx, Apache, IIS, a load balancer) at it and terminate TLS there; set `RIP_CORS_ORIGINS` to the
+public origin. On a trusted private network you can instead expose it directly with
+`RIP_BIND=0.0.0.0` in `.env` (plain HTTP, so not over the internet).
+
+### Manual setup
+
 1. `cp .env.example .env` and set strong values for `RIP_SECRET_KEY`, `POSTGRES_PASSWORD`,
    `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `RIP_CONTACT_EMAIL` and `RIP_CORS_ORIGINS`.
 2. `docker compose up -d --build`. The `migrate` service applies Alembic migrations before `api` and
-   `worker` start.
-3. Put a TLS-terminating reverse proxy in front of `web` (port 8080).
-4. Run `docker compose exec api python -m app.cli verify-connectors` and keep the report.
-5. Optional: `RIP_ALLOW_REGISTRATION=false`, then `python -m app.cli create-user EMAIL NAME`.
+   `worker` start. All long-running services restart automatically after a reboot.
+3. Run `docker compose exec api python -m app.cli verify-connectors` and keep the report.
+4. Optional: `RIP_ALLOW_REGISTRATION=false`, then `python -m app.cli create-user EMAIL NAME`.
 
-Upgrades: `git pull && docker compose up -d --build`. Migrations run automatically.
+Upgrades: `./rip.sh update` (or `git pull && docker compose up -d --build`). Migrations run automatically.
 To check that the schema matches the models: `docker compose run --rm migrate alembic check`.
 
 ## Job durability and recovery

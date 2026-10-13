@@ -24,9 +24,26 @@ git clone <repository> && cd AR-BJS/research-intel
 | `./rip.sh stop` | ปิดระบบ (ข้อมูลไม่หาย) |
 | `./rip.sh update` | อัปเดตเป็นเวอร์ชันล่าสุด |
 
-ถ้าจะเปิดให้คนอื่นใช้งานผ่านอินเทอร์เน็ต ควรตั้ง HTTPS (reverse proxy) ไว้ด้านหน้า
-และตั้ง `RIP_ALLOW_REGISTRATION=false` ในไฟล์ `.env` เพื่อปิดการสมัครเอง
-(ดู `docs/OPERATIONS.md` และ `docs/SECURITY.md`)
+หากไม่ระบุโดเมน ระบบจะเปิดให้เข้าใช้ได้จากเครื่องเซิร์ฟเวอร์เองเท่านั้น (`127.0.0.1:8080`)
+
+### เปิดเป็นเว็บไซต์บนโดเมนของคุณ (HTTPS)
+
+1. เช่าเซิร์ฟเวอร์ Linux (Ubuntu สเปกอย่างน้อย 2 vCPU, RAM 4 GB, ดิสก์ 40 GB) แล้วติดตั้ง Docker:
+   `curl -fsSL https://get.docker.com | sh`
+2. ที่ผู้ให้บริการโดเมน สร้าง **A record** เช่น `research.yourdomain.com` ชี้ไปที่ IP ของเซิร์ฟเวอร์
+3. เปิดพอร์ต 22, 80 และ 443 ทั้งใน firewall ของผู้ให้บริการคลาวด์ และบนเครื่อง
+   (`ufw allow 22,80,443/tcp && ufw enable`)
+4. รันคำสั่ง:
+   ```bash
+   ./rip.sh start --domain research.yourdomain.com --email you@yourdomain.com
+   ./rip.sh admin      # สร้างบัญชีแรก (เว็บสาธารณะจะปิดการสมัครเองไว้เป็นค่าเริ่มต้น)
+   ```
+5. เปิด `https://research.yourdomain.com` ในเบราว์เซอร์
+
+ระบบจะขอใบรับรอง HTTPS จาก Let's Encrypt และต่ออายุให้อัตโนมัติ
+ถ้าเปิดเว็บไม่ได้ ให้ตรวจว่า DNS ชี้มาที่เซิร์ฟเวอร์แล้ว และพอร์ต 80/443 เปิดอยู่
+แล้วดูความคืบหน้าของการออกใบรับรองด้วย `./rip.sh logs caddy`
+(รายละเอียดเพิ่มเติม: `docs/OPERATIONS.md` และ `docs/SECURITY.md`)
 
 ## 2. เริ่มใช้งาน
 
